@@ -1,0 +1,10 @@
+# Ignore large data files
+data/raw/
+data/processed/
+models/
+__pycache__/
+*.zip
+*.csv
+*.pt
+*.bin
+*.log
