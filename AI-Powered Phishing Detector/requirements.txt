@@ -1,0 +1,13 @@
+kaggle
+pandas
+numpy
+scikit-learn
+transformers
+datasets
+pyarrow
+shap
+lime
+matplotlib
+seaborn
+fastapi
+uvicorn
