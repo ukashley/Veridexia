@@ -1,0 +1,44 @@
+{
+  "model": "distilbert-base-uncased",
+  "training": {
+    "epochs": 4,
+    "train_batch_size": 8,
+    "grad_accumulation": 2,
+    "effective_batch_size": 16,
+    "learning_rate": 2e-05,
+    "train_loss": 0.18179560179511706,
+    "train_runtime": 1046.1343
+  },
+  "validation": {
+    "accuracy": 0.9925015365703749,
+    "precision": 0.9922788956481048,
+    "recall": 0.9934410869055985,
+    "f1": 0.9928596511764017,
+    "precision_phishing": 0.9922788956481048,
+    "recall_phishing": 0.9934410869055985,
+    "f1_phishing": 0.9928596511764017
+  },
+  "test": {
+    "accuracy": 0.991210277214334,
+    "precision": 0.9928370126820103,
+    "recall": 0.9903947522548905,
+    "f1": 0.9916143787016947,
+    "precision_phishing": 0.9928370126820103,
+    "recall_phishing": 0.9903947522548905,
+    "f1_phishing": 0.9916143787016947
+  },
+  "confusion_matrix": [
+    [
+      7671,
+      61
+    ],
+    [
+      82,
+      8455
+    ]
+  ],
+  "class_weights": [
+    1.051989801574105,
+    0.9529069183652977
+  ]
+}
