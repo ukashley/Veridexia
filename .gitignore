@@ -209,7 +209,7 @@ __marimo__/
 # AI-Powered Phishing Detector specific ignores
 AI-Powered Phishing Detector/data/
 AI-Powered Phishing Detector/scripts/data/
-AI-Powered Phishing Detector/models/
+AI-Powered Phishing Detector/models/distilbert/final_model
 AI-Powered Phishing Detector/__pycache__/
 AI-Powered Phishing Detector/*.zip
 AI-Powered Phishing Detector/*.pt
