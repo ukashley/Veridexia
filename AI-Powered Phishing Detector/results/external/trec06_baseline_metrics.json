@@ -1,0 +1,41 @@
+{
+  "dataset": "TREC-06 (external)",
+  "accuracy": 0.927439024390244,
+  "confusion_matrix": [
+    [
+      11514,
+      897
+    ],
+    [
+      293,
+      3696
+    ]
+  ],
+  "report": {
+    "0": {
+      "precision": 0.9752,
+      "recall": 0.9277,
+      "f1-score": 0.9509,
+      "support": 12411.0
+    },
+    "1": {
+      "precision": 0.8047,
+      "recall": 0.9265,
+      "f1-score": 0.8613,
+      "support": 3989.0
+    },
+    "accuracy": 0.927439024390244,
+    "macro avg": {
+      "precision": 0.8899,
+      "recall": 0.9271,
+      "f1-score": 0.9061,
+      "support": 16400.0
+    },
+    "weighted avg": {
+      "precision": 0.9337,
+      "recall": 0.9274,
+      "f1-score": 0.9291,
+      "support": 16400.0
+    }
+  }
+}

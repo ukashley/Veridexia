@@ -1,27 +1,25 @@
-import time
 from pathlib import Path
-
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from .common import PredictionResult
 
-# Model configuration
-MODEL_PATH = Path("models/distilbert/final_model")
+class DistilBertPredictor:
+    def __init__(self, model_dir=Path("models/distilbert/final_model")):
+        self.model_dir = model_dir
+        self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
+        self.model = AutoModelForSequenceClassification.from_pretrained(model_dir)
+        self.model.eval()
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
 
-# To load tokenizer only once at import time
-tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-model = AutoModelForSequenceClassification.from_pretrained(MODEL_PATH)
-model.eval()  
+    def predict(self, text: str, threshold: float = 0.5, max_length: int = 256) -> PredictionResult:
+        enc = self.tokenizer(text, truncation=True, padding=True, max_length=max_length, return_tensors="pt")
+        enc = {k: v.to(self.device) for k, v in enc.items()}
+        with torch.no_grad():
+            logits = self.model(**enc).logits
+            prob = torch.softmax(logits, dim=1)[0, 1].item()
 
-# Public API
-def predict(text: str) -> dict:
-    """
-    Run phishing detection on a single email.
-
-    Args:
-        text (str): Raw email text
-
-    Returns:
-        dict: prediction result (label, probabilities, inference time)
-    """
-    # You will implement this step by step
-    raise NotImplementedError("predict() not implemented yet")
+        label = int(prob >= threshold)
+        return PredictionResult(label=label, prob_phishing=float(prob),
+                                model_name="distilbert",
+                                threshold=threshold)
