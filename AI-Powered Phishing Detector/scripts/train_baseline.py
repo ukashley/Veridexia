@@ -38,19 +38,19 @@ train_df = pd.read_csv(PROC_DIR / "train.csv")
 val_df = pd.read_csv(PROC_DIR / "val.csv")
 test_df = pd.read_csv(PROC_DIR / "test.csv")
 
-print(f"✓ Data loaded:")
-print(f"  • Train: {len(train_df):,} samples")
-print(f"  • Val:   {len(val_df):,} samples")
-print(f"  • Test:  {len(test_df):,} samples")
+print(f"[OK] Data loaded:")
+print(f"  - Train: {len(train_df):,} samples")
+print(f"  - Val:   {len(val_df):,} samples")
+print(f"  - Test:  {len(test_df):,} samples")
 
 # Combining train and val for final training 
 train_full_df = pd.concat([train_df, val_df], ignore_index=True)
-print(f"  • Combined train+val: {len(train_full_df):,} samples")
+print(f"  - Combined train+val: {len(train_full_df):,} samples")
 
 # Class distribution testing
 print(f"\n  Class distribution (test set):")
-print(f"  • Legitimate: {(test_df['label']==0).sum():,} ({(test_df['label']==0).mean():.1%})")
-print(f"  • Phishing:   {(test_df['label']==1).sum():,} ({(test_df['label']==1).mean():.1%})")
+print(f"  - Legitimate: {(test_df['label']==0).sum():,} ({(test_df['label']==0).mean():.1%})")
+print(f"  - Phishing:   {(test_df['label']==1).sum():,} ({(test_df['label']==1).mean():.1%})")
 
 # TF-IDF VECTORIZATION
 print("\n[2] Creating TF-IDF features...")
@@ -78,10 +78,10 @@ y_test = test_df['label'].values
 
 vectorize_time = time.time() - start_time
 
-print(f"✓ TF-IDF vectorization complete ({vectorize_time:.2f}s)")
-print(f"  • Vocabulary size: {len(tfidf.vocabulary_):,} words")
-print(f"  • Feature matrix shape: {X_train.shape}")
-print(f"  • Sparsity: {(1 - X_train.nnz / (X_train.shape[0] * X_train.shape[1])):.2%}")
+print(f"[OK] TF-IDF vectorization complete ({vectorize_time:.2f}s)")
+print(f"  - Vocabulary size: {len(tfidf.vocabulary_):,} words")
+print(f"  - Feature matrix shape: {X_train.shape}")
+print(f"  - Sparsity: {(1 - X_train.nnz / (X_train.shape[0] * X_train.shape[1])):.2%}")
 
 # Show top features
 feature_names = tfidf.get_feature_names_out()
@@ -107,9 +107,9 @@ clf = LogisticRegression(
 clf.fit(X_train, y_train)
 train_time = time.time() - start_time
 
-print(f"✓ Training complete ({train_time:.2f}s)")
-print(f"  • Converged: {clf.n_iter_[0] < clf.max_iter}")
-print(f"  • Iterations: {clf.n_iter_[0]}")
+print(f"[OK] Training complete ({train_time:.2f}s)")
+print(f"  - Converged: {clf.n_iter_[0] < clf.max_iter}")
+print(f"  - Iterations: {clf.n_iter_[0]}")
 
 # EVALUATE ON TEST SET 
 print("\n[4] Evaluating on test set...")
@@ -132,16 +132,16 @@ precision_pc, recall_pc, f1_pc, _ = precision_recall_fscore_support(
 # ROC-AUC
 roc_auc = roc_auc_score(y_test, y_pred_proba)
 
-print(f"\n✓ Test Results:")
-print(f"  • Accuracy:  {accuracy:.4f} ({accuracy:.2%})")
-print(f"  • Precision: {precision:.4f} ({precision:.2%})")
-print(f"  • Recall:    {recall:.4f} ({recall:.2%})")
-print(f"  • F1-score:  {f1:.4f} ({f1:.2%})")
-print(f"  • ROC-AUC:   {roc_auc:.4f}")
+print(f"\n[OK] Test Results:")
+print(f"  - Accuracy:  {accuracy:.4f} ({accuracy:.2%})")
+print(f"  - Precision: {precision:.4f} ({precision:.2%})")
+print(f"  - Recall:    {recall:.4f} ({recall:.2%})")
+print(f"  - F1-score:  {f1:.4f} ({f1:.2%})")
+print(f"  - ROC-AUC:   {roc_auc:.4f}")
 
 print(f"\n  Per-class metrics:")
-print(f"  • Legitimate - Precision: {precision_pc[0]:.4f}, Recall: {recall_pc[0]:.4f}, F1: {f1_pc[0]:.4f}")
-print(f"  • Phishing   - Precision: {precision_pc[1]:.4f}, Recall: {recall_pc[1]:.4f}, F1: {f1_pc[1]:.4f}")
+print(f"  - Legitimate - Precision: {precision_pc[0]:.4f}, Recall: {recall_pc[0]:.4f}, F1: {f1_pc[0]:.4f}")
+print(f"  - Phishing   - Precision: {precision_pc[1]:.4f}, Recall: {recall_pc[1]:.4f}, F1: {f1_pc[1]:.4f}")
 
 # CONFUSION MATRIX 
 print("\n[5] Generating confusion matrix...")
@@ -163,7 +163,7 @@ ax.set_ylabel('True Label', fontweight='bold')
 ax.set_xlabel('Predicted Label', fontweight='bold')
 plt.tight_layout()
 plt.savefig(MODEL_DIR / "confusion_matrix.png", dpi=300, bbox_inches='tight')
-print(f"✓ Confusion matrix saved to {MODEL_DIR / 'confusion_matrix.png'}")
+print(f"[OK] Confusion matrix saved to {MODEL_DIR / 'confusion_matrix.png'}")
 
 # ROC CURVE 
 print("\n[6] Generating ROC curve...")
@@ -181,7 +181,7 @@ ax.legend(loc="lower right")
 ax.grid(alpha=0.3)
 plt.tight_layout()
 plt.savefig(MODEL_DIR / "roc_curve.png", dpi=300, bbox_inches='tight')
-print(f"✓ ROC curve saved to {MODEL_DIR / 'roc_curve.png'}")
+print(f"[OK] ROC curve saved to {MODEL_DIR / 'roc_curve.png'}")
 
 # FEATURE IMPORTANCE 
 print("\n[7] Analyzing feature importance...")
@@ -211,7 +211,7 @@ axes[0].barh(range(len(words_p)), coefs_p, color='#e74c3c', alpha=0.8, edgecolor
 axes[0].set_yticks(range(len(words_p)))
 axes[0].set_yticklabels(words_p)
 axes[0].invert_yaxis()
-axes[0].set_xlabel('Coefficient (→ Phishing)', fontweight='bold')
+axes[0].set_xlabel('Coefficient (-> Phishing)', fontweight='bold')
 axes[0].set_title('Top Features for Phishing Detection', fontweight='bold', fontsize=12)
 
 # Legitimate indicators
@@ -220,12 +220,12 @@ axes[1].barh(range(len(words_l)), coefs_l, color='#2ecc71', alpha=0.8, edgecolor
 axes[1].set_yticks(range(len(words_l)))
 axes[1].set_yticklabels(words_l)
 axes[1].invert_yaxis()
-axes[1].set_xlabel('Coefficient (→ Legitimate)', fontweight='bold')
+axes[1].set_xlabel('Coefficient (-> Legitimate)', fontweight='bold')
 axes[1].set_title('Top Features for Legitimate Detection', fontweight='bold', fontsize=12)
 
 plt.tight_layout()
 plt.savefig(MODEL_DIR / "feature_importance.png", dpi=300, bbox_inches='tight')
-print(f"✓ Feature importance saved to {MODEL_DIR / 'feature_importance.png'}")
+print(f"[OK] Feature importance saved to {MODEL_DIR / 'feature_importance.png'}")
 
 # SAVE MODEL AND METRICS 
 print("\n[8] Saving model and metrics...")
@@ -272,9 +272,9 @@ metrics = {
 with open(MODEL_DIR / "metrics.json", "w") as f:
     json.dump(metrics, f, indent=2)
 
-print(f"✓ Model saved to {MODEL_DIR / 'model.pkl'}")
-print(f"✓ Vectorizer saved to {MODEL_DIR / 'vectorizer.pkl'}")
-print(f"✓ Metrics saved to {MODEL_DIR / 'metrics.json'}")
+print(f"[OK] Model saved to {MODEL_DIR / 'model.pkl'}")
+print(f"[OK] Vectorizer saved to {MODEL_DIR / 'vectorizer.pkl'}")
+print(f"[OK] Metrics saved to {MODEL_DIR / 'metrics.json'}")
 
 # SUMMARY
 print("\n" + "="*70)
@@ -282,23 +282,23 @@ print("BASELINE TRAINING COMPLETE!")
 print("="*70)
 
 print(f"\n Final Test Results:")
-print(f"  • Accuracy:  {accuracy:.2%}")
-print(f"  • Precision: {precision:.2%}")
-print(f"  • Recall:    {recall:.2%}")
-print(f"  • F1-score:  {f1:.2%}")
-print(f"  • ROC-AUC:   {roc_auc:.4f}")
+print(f"  - Accuracy:  {accuracy:.2%}")
+print(f"  - Precision: {precision:.2%}")
+print(f"  - Recall:    {recall:.2%}")
+print(f"  - F1-score:  {f1:.2%}")
+print(f"  - ROC-AUC:   {roc_auc:.4f}")
 
 print(f"\n Performance:")
-print(f"  • Vectorization: {vectorize_time:.2f}s")
-print(f"  • Training: {train_time:.2f}s")
-print(f"  • Total: {vectorize_time + train_time:.2f}s")
+print(f"  - Vectorization: {vectorize_time:.2f}s")
+print(f"  - Training: {train_time:.2f}s")
+print(f"  - Total: {vectorize_time + train_time:.2f}s")
 
 print(f"\n Outputs:")
-print(f"  • Model: {MODEL_DIR / 'model.pkl'}")
-print(f"  • Vectorizer: {MODEL_DIR / 'vectorizer.pkl'}")
-print(f"  • Metrics: {MODEL_DIR / 'metrics.json'}")
-print(f"  • Confusion matrix: {MODEL_DIR / 'confusion_matrix.png'}")
-print(f"  • ROC curve: {MODEL_DIR / 'roc_curve.png'}")
-print(f"  • Feature importance: {MODEL_DIR / 'feature_importance.png'}")
+print(f"  - Model: {MODEL_DIR / 'model.pkl'}")
+print(f"  - Vectorizer: {MODEL_DIR / 'vectorizer.pkl'}")
+print(f"  - Metrics: {MODEL_DIR / 'metrics.json'}")
+print(f"  - Confusion matrix: {MODEL_DIR / 'confusion_matrix.png'}")
+print(f"  - ROC curve: {MODEL_DIR / 'roc_curve.png'}")
+print(f"  - Feature importance: {MODEL_DIR / 'feature_importance.png'}")
 
 print("\n Ready for model comparison!")

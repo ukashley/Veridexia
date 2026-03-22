@@ -21,21 +21,21 @@ def _confidence_band(prob_phishing: float, threshold: float) -> str:
     return 'mixed'
 
 
-def generate_explanation(result, evidence=None, rule_evidence=None):
-    prob = float(result.prob_phishing)
+def generate_explanation(result, evidence=None, rule_evidence=None, display_label: str | None = None, display_prob: float | None = None):
+    prob = float(result.prob_phishing if display_prob is None else display_prob)
     threshold = float(result.threshold)
     confidence = _confidence_band(prob, threshold)
+    is_phishing = (display_label == 'Phishing') if display_label is not None else (result.label == 1)
 
     rules = rule_evidence or {}
     risk_titles = [s.get('title', '').lower() for s in rules.get('signals', [])][:3]
     reassurance_titles = [s.get('title', '').lower() for s in rules.get('reassurance_signals', [])][:2]
-    context_titles = [s.get('title', '').lower() for s in rules.get('context_signals', [])][:2]
     has_credential_request = bool(rules.get('has_credential_request'))
     risk_score = float(rules.get('risk_score', 0.0))
 
     parts = []
 
-    if result.label == 1:
+    if is_phishing:
         if risk_titles:
             parts.append(
                 f'This email was flagged as phishing because it shows warning signs such as {_join_labels(risk_titles)}.'
@@ -48,11 +48,6 @@ def generate_explanation(result, evidence=None, rule_evidence=None):
         if reassurance_titles:
             parts.append(
                 f'Some wording also suggested a more benign interpretation, including {_join_labels(reassurance_titles)}, so this should be treated as a cautious warning rather than an absolute conclusion.'
-            )
-
-        if not risk_titles and context_titles:
-            parts.append(
-                f'The visible text mainly provided context such as {_join_labels(context_titles)} rather than strong phishing indicators.'
             )
 
         parts.append(
@@ -76,11 +71,6 @@ def generate_explanation(result, evidence=None, rule_evidence=None):
                 'This email was classified as legitimate because it does not strongly match common phishing patterns such as credential harvesting, urgency pressure, or threatening account language.'
             )
 
-        if context_titles and not reassurance_titles:
-            parts.append(
-                f'The message also contains neutral context such as {_join_labels(context_titles)}, which does not by itself indicate phishing.'
-            )
-
     if confidence == 'high':
         parts.append('Model confidence for this decision was high.')
     elif confidence == 'moderate':
@@ -88,7 +78,7 @@ def generate_explanation(result, evidence=None, rule_evidence=None):
     else:
         parts.append('The indicators for this message were mixed, so manual caution is still advisable.')
 
-    if evidence and isinstance(evidence, dict) and evidence.get('top_terms'):
+    if is_phishing and evidence and isinstance(evidence, dict) and evidence.get('top_terms'):
         terms = [term for term, _ in evidence['top_terms'][:5]]
         if terms:
             parts.append(f'For the baseline model, influential terms included: {", ".join(terms)}.')

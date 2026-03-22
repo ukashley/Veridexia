@@ -37,11 +37,11 @@ print("\n[1] Loading dataset statistics...")
 with open(STATS_FILE, "r") as f:
     stats = json.load(f)
 
-print(f"✓ Dataset info:")
-print(f"  • Train: {stats['dataset_info']['train_samples']:,} samples")
-print(f"  • Val:   {stats['dataset_info']['val_samples']:,} samples")
-print(f"  • Test:  {stats['dataset_info']['test_samples']:,} samples")
-print(f"  • Class distribution: {stats['class_distribution']['legitimate_ratio']:.1%} legitimate, {stats['class_distribution']['phishing_ratio']:.1%} phishing")
+print(f"[OK] Dataset info:")
+print(f"  - Train: {stats['dataset_info']['train_samples']:,} samples")
+print(f"  - Val:   {stats['dataset_info']['val_samples']:,} samples")
+print(f"  - Test:  {stats['dataset_info']['test_samples']:,} samples")
+print(f"  - Class distribution: {stats['class_distribution']['legitimate_ratio']:.1%} legitimate, {stats['class_distribution']['phishing_ratio']:.1%} phishing")
 
 # ===== LOAD TOKENIZED DATASETS =====
 print("\n[2] Loading tokenized datasets...")
@@ -49,10 +49,10 @@ train_dataset = load_from_disk(str(TOK_DIR / "train"))
 val_dataset = load_from_disk(str(TOK_DIR / "val"))
 test_dataset = load_from_disk(str(TOK_DIR / "test"))
 
-print(f"✓ Loaded datasets:")
-print(f"  • Train: {len(train_dataset):,} samples")
-print(f"  • Val:   {len(val_dataset):,} samples")
-print(f"  • Test:  {len(test_dataset):,} samples")
+print(f"[OK] Loaded datasets:")
+print(f"  - Train: {len(train_dataset):,} samples")
+print(f"  - Val:   {len(val_dataset):,} samples")
+print(f"  - Test:  {len(test_dataset):,} samples")
 
 # ===== CALCULATE CLASS WEIGHTS =====
 print("\n[3] Calculating class weights for imbalanced data...")
@@ -66,10 +66,10 @@ total_samples = len(train_labels)
 class_weights = total_samples / (len(label_counts) * label_counts)
 class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32)
 
-print(f"✓ Class weights calculated:")
-print(f"  • Legitimate (0): {class_weights[0]:.3f} (count: {label_counts[0]:,})")
-print(f"  • Phishing (1):   {class_weights[1]:.3f} (count: {label_counts[1]:,})")
-print(f"  → This helps the model pay more attention to the minority class")
+print(f"[OK] Class weights calculated:")
+print(f"  - Legitimate (0): {class_weights[0]:.3f} (count: {label_counts[0]:,})")
+print(f"  - Phishing (1):   {class_weights[1]:.3f} (count: {label_counts[1]:,})")
+print(f"  -> This helps the model pay more attention to the minority class")
 
 # ===== LOAD MODEL =====
 print("\n[4] Loading DistilBERT model...")
@@ -99,9 +99,9 @@ class WeightedDistilBERT(torch.nn.Module):
         return outputs
 
 model = WeightedDistilBERT(model_name, class_weights_tensor)
-print(f"✓ Model loaded: {model_name}")
-print(f"  • Parameters: {sum(p.numel() for p in model.parameters()):,}")
-print(f"  • Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+print(f"[OK] Model loaded: {model_name}")
+print(f"  - Parameters: {sum(p.numel() for p in model.parameters()):,}")
+print(f"  - Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
 # ===== DEFINE METRICS =====
 def compute_metrics(eval_pred):
@@ -170,11 +170,11 @@ training_args = TrainingArguments(
     seed=42,
 )
 
-print(f"✓ Training configuration:")
-print(f"  • Epochs: {training_args.num_train_epochs}")
-print(f"  • Batch size: {training_args.per_device_train_batch_size}")
-print(f"  • Learning rate: {training_args.learning_rate}")
-print(f"  • Device: {'GPU (fp16)' if training_args.fp16 else 'CPU'}")
+print(f"[OK] Training configuration:")
+print(f"  - Epochs: {training_args.num_train_epochs}")
+print(f"  - Batch size: {training_args.per_device_train_batch_size}")
+print(f"  - Learning rate: {training_args.learning_rate}")
+print(f"  - Device: {'GPU (fp16)' if training_args.fp16 else 'CPU'}")
 
 # ===== INITIALIZE TRAINER =====
 print("\n[6] Initializing trainer...")
@@ -188,7 +188,7 @@ trainer = Trainer(
     callbacks=[EarlyStoppingCallback(early_stopping_patience=3)]
 )
 
-print("✓ Trainer initialized with early stopping (patience=3)")
+print("[OK] Trainer initialized with early stopping (patience=3)")
 
 # ===== TRAIN MODEL =====
 print("\n[7] Starting training...")
@@ -197,37 +197,37 @@ print("-"*70)
 train_result = trainer.train()
 
 print("-"*70)
-print("✓ Training complete!")
-print(f"  • Training time: {train_result.metrics['train_runtime']:.2f}s")
-print(f"  • Training loss: {train_result.metrics['train_loss']:.4f}")
+print("[OK] Training complete!")
+print(f"  - Training time: {train_result.metrics['train_runtime']:.2f}s")
+print(f"  - Training loss: {train_result.metrics['train_loss']:.4f}")
 
 # ===== EVALUATE ON VALIDATION SET =====
 print("\n[8] Evaluating on validation set...")
 val_metrics = trainer.evaluate(eval_dataset=val_dataset)
 
-print(f"✓ Validation metrics:")
-print(f"  • Accuracy:  {val_metrics['eval_accuracy']:.4f}")
-print(f"  • Precision: {val_metrics['eval_precision']:.4f}")
-print(f"  • Recall:    {val_metrics['eval_recall']:.4f}")
-print(f"  • F1-score:  {val_metrics['eval_f1']:.4f}")
+print(f"[OK] Validation metrics:")
+print(f"  - Accuracy:  {val_metrics['eval_accuracy']:.4f}")
+print(f"  - Precision: {val_metrics['eval_precision']:.4f}")
+print(f"  - Recall:    {val_metrics['eval_recall']:.4f}")
+print(f"  - F1-score:  {val_metrics['eval_f1']:.4f}")
 print(f"\n  Per-class (Phishing detection):")
-print(f"  • Precision: {val_metrics['eval_precision_phishing']:.4f}")
-print(f"  • Recall:    {val_metrics['eval_recall_phishing']:.4f}")
-print(f"  • F1-score:  {val_metrics['eval_f1_phishing']:.4f}")
+print(f"  - Precision: {val_metrics['eval_precision_phishing']:.4f}")
+print(f"  - Recall:    {val_metrics['eval_recall_phishing']:.4f}")
+print(f"  - F1-score:  {val_metrics['eval_f1_phishing']:.4f}")
 
 # ===== EVALUATE ON TEST SET =====
 print("\n[9] Evaluating on test set...")
 test_metrics = trainer.evaluate(eval_dataset=test_dataset)
 
-print(f"✓ Test metrics:")
-print(f"  • Accuracy:  {test_metrics['eval_accuracy']:.4f}")
-print(f"  • Precision: {test_metrics['eval_precision']:.4f}")
-print(f"  • Recall:    {test_metrics['eval_recall']:.4f}")
-print(f"  • F1-score:  {test_metrics['eval_f1']:.4f}")
+print(f"[OK] Test metrics:")
+print(f"  - Accuracy:  {test_metrics['eval_accuracy']:.4f}")
+print(f"  - Precision: {test_metrics['eval_precision']:.4f}")
+print(f"  - Recall:    {test_metrics['eval_recall']:.4f}")
+print(f"  - F1-score:  {test_metrics['eval_f1']:.4f}")
 print(f"\n  Per-class (Phishing detection):")
-print(f"  • Precision: {test_metrics['eval_precision_phishing']:.4f}")
-print(f"  • Recall:    {test_metrics['eval_recall_phishing']:.4f}")
-print(f"  • F1-score:  {test_metrics['eval_f1_phishing']:.4f}")
+print(f"  - Precision: {test_metrics['eval_precision_phishing']:.4f}")
+print(f"  - Recall:    {test_metrics['eval_recall_phishing']:.4f}")
+print(f"  - F1-score:  {test_metrics['eval_f1_phishing']:.4f}")
 
 # ===== GENERATE CONFUSION MATRIX =====
 print("\n[10] Generating confusion matrix...")
@@ -248,7 +248,7 @@ plt.ylabel('True Label', fontweight='bold')
 plt.xlabel('Predicted Label', fontweight='bold')
 plt.tight_layout()
 plt.savefig(MODEL_DIR / "confusion_matrix.png", dpi=300, bbox_inches='tight')
-print(f"✓ Confusion matrix saved to {MODEL_DIR / 'confusion_matrix.png'}")
+print(f"[OK] Confusion matrix saved to {MODEL_DIR / 'confusion_matrix.png'}")
 
 # ===== SAVE MODEL =====
 print("\n[11] Saving model and metrics...")
@@ -292,27 +292,27 @@ all_metrics = {
 with open(MODEL_DIR / "metrics.json", "w") as f:
     json.dump(all_metrics, f, indent=2)
 
-print(f"✓ Model saved to {MODEL_DIR / 'final_model'}")
-print(f"✓ Metrics saved to {MODEL_DIR / 'metrics.json'}")
+print(f"[OK] Model saved to {MODEL_DIR / 'final_model'}")
+print(f"[OK] Metrics saved to {MODEL_DIR / 'metrics.json'}")
 
 # ===== SUMMARY =====
 print("\n" + "="*70)
 print("TRAINING COMPLETE!")
 print("="*70)
 print(f"\n Final Test Results:")
-print(f"  • Accuracy:  {test_metrics['eval_accuracy']:.2%}")
-print(f"  • Precision: {test_metrics['eval_precision']:.2%}")
-print(f"  • Recall:    {test_metrics['eval_recall']:.2%}")
-print(f"  • F1-score:  {test_metrics['eval_f1']:.2%}")
+print(f"  - Accuracy:  {test_metrics['eval_accuracy']:.2%}")
+print(f"  - Precision: {test_metrics['eval_precision']:.2%}")
+print(f"  - Recall:    {test_metrics['eval_recall']:.2%}")
+print(f"  - F1-score:  {test_metrics['eval_f1']:.2%}")
 
 print(f"\n Phishing Detection Performance:")
-print(f"  • Precision: {test_metrics['eval_precision_phishing']:.2%} (of flagged emails, % actually phishing)")
-print(f"  • Recall:    {test_metrics['eval_recall_phishing']:.2%} (% of phishing emails caught)")
-print(f"  • F1-score:  {test_metrics['eval_f1_phishing']:.2%} (harmonic mean)")
+print(f"  - Precision: {test_metrics['eval_precision_phishing']:.2%} (of flagged emails, % actually phishing)")
+print(f"  - Recall:    {test_metrics['eval_recall_phishing']:.2%} (% of phishing emails caught)")
+print(f"  - F1-score:  {test_metrics['eval_f1_phishing']:.2%} (harmonic mean)")
 
 print(f"\n Outputs:")
-print(f"  • Model: {MODEL_DIR / 'final_model'}")
-print(f"  • Metrics: {MODEL_DIR / 'metrics.json'}")
-print(f"  • Confusion matrix: {MODEL_DIR / 'confusion_matrix.png'}")
+print(f"  - Model: {MODEL_DIR / 'final_model'}")
+print(f"  - Metrics: {MODEL_DIR / 'metrics.json'}")
+print(f"  - Confusion matrix: {MODEL_DIR / 'confusion_matrix.png'}")
 
 print("\n Ready for baseline comparison and deployment!")

@@ -118,10 +118,14 @@ print(f"[INFO] Label distribution:")
 print(f"  Legitimate: {label_distribution.get(0, 0):.2%}")
 print(f"  Phishing: {label_distribution.get(1, 0):.2%}")
 
-minority_ratio = min(label_distribution.get(0, 0), label_distribution.get(1, 0))
-if minority_ratio < 0.2:
-    print(f"\n  WARNING: Severe class imbalance! Minority class: {minority_ratio:.2%}")
-    print("   → Consider class weights in training")
+minority_share = min(label_distribution.get(0, 0), label_distribution.get(1, 0))
+majority_count = max(label_counts.get(0, 0), label_counts.get(1, 0))
+minority_count = min(label_counts.get(0, 0), label_counts.get(1, 0))
+imbalance_ratio = (majority_count / minority_count) if minority_count else None
+
+if minority_share < 0.2:
+    print(f"\n  WARNING: Severe class imbalance! Minority class: {minority_share:.2%}")
+    print("   -> Consider class weights in training")
 
 # ===== FEATURE ENGINEERING =====
 print("\n[INFO] Extracting features for analysis...")
@@ -187,7 +191,7 @@ train_df.to_csv(PROC / "train.csv", index=False)
 val_df.to_csv(PROC / "val.csv", index=False)
 test_df.to_csv(PROC / "test.csv", index=False)
 df.to_csv(PROC / "phishing_corpus.csv", index=False)
-print(f"\n[SAVED] CSV splits → {PROC}/")
+print(f"\n[SAVED] CSV splits -> {PROC}/")
 
 # Tokenization (DistilBERT)
 print("\n[INFO] Tokenizing with DistilBERT...")
@@ -201,7 +205,7 @@ def df_to_tokenized(dataset_df, split_name):
     dataset = Dataset.from_pandas(dataset_df[['text', 'label']].reset_index(drop=True))
     dataset = dataset.map(tokenize, batched=True, remove_columns=['text'])
     dataset.save_to_disk(str(TOK / split_name))
-    print(f"[SAVED] {split_name} → {TOK/split_name}")
+    print(f"[SAVED] {split_name} -> {TOK/split_name}")
 
 df_to_tokenized(train_df, "train")
 df_to_tokenized(val_df, "val")
@@ -221,7 +225,7 @@ stats = {
         "phishing_count": int(label_counts.get(1, 0)),
         "legitimate_ratio": float(label_distribution.get(0, 0)),
         "phishing_ratio": float(label_distribution.get(1, 0)),
-        "imbalance_ratio": float(minority_ratio)
+        "imbalance_ratio": float(imbalance_ratio) if imbalance_ratio is not None else None
     },
     "feature_statistics": {
         "avg_urls_phishing": float(df[df['label']==1]['url_count'].mean()),
@@ -235,19 +239,19 @@ stats = {
 
 with open(PROC / "dataset_stats.json", "w") as f:
     json.dump(stats, f, indent=2)
-print(f"[SAVED] Statistics → {PROC}/dataset_stats.json")
+print(f"[SAVED] Statistics -> {PROC}/dataset_stats.json")
 
 print("\n" + "="*60)
 print(" DATASET PREPARATION COMPLETE!")
 print("="*60)
 print(f" Summary:")
-print(f"  • Total samples: {len(df):,}")
-print(f"  • Legitimate: {label_counts.get(0, 0):,} ({label_distribution.get(0, 0):.1%})")
-print(f"  • Phishing: {label_counts.get(1, 0):,} ({label_distribution.get(1, 0):.1%})")
-print(f"  • Features extracted: url_count, urgency_score, suspicious_patterns")
-print(f"  • Tokenized for DistilBERT training")
+print(f"  - Total samples: {len(df):,}")
+print(f"  - Legitimate: {label_counts.get(0, 0):,} ({label_distribution.get(0, 0):.1%})")
+print(f"  - Phishing: {label_counts.get(1, 0):,} ({label_distribution.get(1, 0):.1%})")
+print(f"  - Features extracted: url_count, urgency_score, suspicious_patterns")
+print(f"  - Tokenized for DistilBERT training")
 print(f"\n Output locations:")
-print(f"  • CSV splits: {PROC}/")
-print(f"  • Tokenized data: {TOK}/")
-print(f"  • Statistics: {PROC}/dataset_stats.json")
+print(f"  - CSV splits: {PROC}/")
+print(f"  - Tokenized data: {TOK}/")
+print(f"  - Statistics: {PROC}/dataset_stats.json")
 print("\n Ready for training!")
