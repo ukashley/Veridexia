@@ -14,3 +14,8 @@ uvicorn
 torch
 accelerate
 evaluate
+streamlit
+beautifulsoup4
+Pillow
+pypdf
+pytesseract

@@ -1,8 +1,9 @@
-# pyright: reportMissingImports=false
+﻿# pyright: reportMissingImports=false
 
 import sys
 from pathlib import Path
 import json
+import re
 import time
 from html import escape
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ if str(ROOT) not in sys.path:
 
 from src.inference.baseline import BaselinePredictor
 from src.inference.distilbert import DistilBertPredictor
+from src.inference.upload_extractors import build_upload_context
 from src.explain.baseline_evidence import baseline_evidence
 from src.explain.nlg import generate_explanation
 from src.explain.rule_evidence import rule_based_evidence
@@ -27,6 +29,11 @@ RESULTS_DIR = ROOT / 'results' / 'external'
 
 BASELINE_METRICS = RESULTS_DIR / 'trec06_baseline_metrics.json'
 DISTILBERT_METRICS = RESULTS_DIR / 'trec06_distilbert_metrics.json'
+BASELINE_INTERNAL_METRICS = BASELINE_DIR / 'metrics.json'
+DISTILBERT_INTERNAL_METRICS = DISTILBERT_DIR / 'metrics.json'
+MODEL_COMPARISON_IMG = RESULTS_DIR / 'model_comparison.png'
+BASELINE_INTERNAL_CM_IMG = BASELINE_DIR / 'confusion_matrix.png'
+DISTILBERT_INTERNAL_CM_IMG = DISTILBERT_DIR / 'confusion_matrix.png'
 BASELINE_CM_IMG = RESULTS_DIR / 'trec06_baseline_confusion_matrix.png'
 DISTILBERT_CM_IMG = RESULTS_DIR / 'trec06_distilbert_confusion_matrix.png'
 BASELINE_ROC_IMG = BASELINE_DIR / 'roc_curve.png'
@@ -36,8 +43,7 @@ SENSITIVITY_THRESHOLDS = {
     'Balanced': 0.65,
     'High': 0.55,
 }
-
-
+INVISIBLE_TRANSLATION = str.maketrans('', '', '\u200b\u200c\u200d\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\ufeff')
 def load_json(path: Path):
     if not path.exists():
         return None
@@ -70,16 +76,83 @@ def get_external_kpis(m: dict):
     cls0 = rep.get('0', {})
     macro = rep.get('macro avg', {})
     weighted = rep.get('weighted avg', {})
+    recall_phish = cls1.get('recall')
+    recall_legit = cls0.get('recall')
 
     return {
         'accuracy': m.get('accuracy'),
         'f1_macro': macro.get('f1-score'),
         'f1_weighted': weighted.get('f1-score'),
-        'recall_phish': cls1.get('recall'),
+        'recall_phish': recall_phish,
         'precision_phish': cls1.get('precision'),
         'f1_phish': cls1.get('f1-score'),
-        'recall_legit': cls0.get('recall'),
+        'recall_legit': recall_legit,
+        'false_negative_rate': (
+            1.0 - float(recall_phish) if isinstance(recall_phish, (int, float)) else None
+        ),
+        'false_positive_rate': (
+            1.0 - float(recall_legit) if isinstance(recall_legit, (int, float)) else None
+        ),
     }
+
+
+def get_internal_kpis(m: dict):
+    if not m:
+        return None
+
+    test = m.get('test', {})
+    cm = m.get('confusion_matrix') or []
+    recall_phish = test.get('recall_phishing', test.get('recall'))
+    recall_legit = test.get('recall_legitimate')
+    precision_phish = test.get('precision_phishing', test.get('precision'))
+    f1_phish = test.get('f1_phishing', test.get('f1'))
+    false_positive_rate = None
+    false_negative_rate = None
+
+    if isinstance(cm, list) and len(cm) == 2 and all(isinstance(row, list) and len(row) == 2 for row in cm):
+        tn, fp = cm[0]
+        fn, tp = cm[1]
+        legit_total = tn + fp
+        phish_total = tp + fn
+        if legit_total:
+            recall_legit = tn / legit_total
+            false_positive_rate = fp / legit_total
+        if phish_total:
+            recall_phish = tp / phish_total
+            false_negative_rate = fn / phish_total
+
+    if false_positive_rate is None and isinstance(recall_legit, (int, float)):
+        false_positive_rate = 1.0 - float(recall_legit)
+    if false_negative_rate is None and isinstance(recall_phish, (int, float)):
+        false_negative_rate = 1.0 - float(recall_phish)
+
+    return {
+        'accuracy': test.get('accuracy'),
+        'precision_phish': precision_phish,
+        'recall_phish': recall_phish,
+        'f1_phish': f1_phish,
+        'false_positive_rate': false_positive_rate,
+        'false_negative_rate': false_negative_rate,
+    }
+
+
+def render_metrics_table(rows: list[dict]):
+    if not rows:
+        return
+
+    df = pd.DataFrame(rows)
+    for col in [
+        'Accuracy',
+        'Precision (phish)',
+        'Recall (phish)',
+        'F1 (phish)',
+        'False positive rate',
+        'False negative rate',
+    ]:
+        if col in df.columns:
+            df[col] = df[col].apply(lambda x: fmt_pct(x) if isinstance(x, (int, float)) else '-')
+    html = df.to_html(index=False)
+    st.markdown(f"<div class='big-table'>{html}</div>", unsafe_allow_html=True)
 
 
 def severity_color(level: str):
@@ -110,6 +183,15 @@ def confidence_label(prob: float, threshold: float):
 
 def threshold_for_sensitivity(level: str) -> float:
     return float(SENSITIVITY_THRESHOLDS.get(level, SENSITIVITY_THRESHOLDS['Balanced']))
+
+
+def normalize_message_text(text: str) -> str:
+    if not text:
+        return ''
+    cleaned = str(text).translate(INVISIBLE_TRANSLATION).replace('\u00a0', ' ')
+    cleaned = re.sub(r'[ \t]+', ' ', cleaned)
+    cleaned = re.sub(r' ?\n ?', '\n', cleaned)
+    return cleaned.strip()
 
 
 def sensitivity_for_threshold(threshold: float) -> str:
@@ -155,9 +237,18 @@ def compute_user_verdict(result, rules: dict, support_result=None):
     clean_message = no_strong_cues and risk_score <= 0 and 'domain_mismatch' not in risk_keys and 'suspicious_link' not in risk_keys
     low_severity_risk_keys = {'payment_language', 'generic_greeting'}
     low_severity_only = bool(risk_keys) and risk_keys.issubset(low_severity_risk_keys)
+    routine_message_keys = {
+        'transactional_notification',
+        'account_administration_notice',
+        'newsletter_context',
+        'job_alert_context',
+    }
     transactional_reassurance = bool(
-        {'transactional_notification', 'sender_brand_match', 'domain_match'} & reassurance_keys
+        (routine_message_keys | {'sender_brand_match', 'domain_match'}) & reassurance_keys
     )
+    strong_benign_reassurance = bool(
+        routine_message_keys & reassurance_keys
+    ) and bool({'sender_brand_match', 'domain_match'} & reassurance_keys)
     display_prob = prob
     decision_basis = 'model'
 
@@ -199,6 +290,32 @@ def compute_user_verdict(result, rules: dict, support_result=None):
         else:
             main_label = "Phishing"
             level = "medium"
+    elif (
+        prob >= threshold
+        and no_strong_cues
+        and risk_score <= -1.0
+        and strong_benign_reassurance
+        and 'domain_mismatch' not in risk_keys
+        and 'suspicious_link' not in risk_keys
+    ):
+        main_label = "Legitimate"
+        level = "review"
+        display_prob = max(0.0, threshold - 0.01)
+        decision_basis = 'benign_notice_override'
+    elif (
+        prob >= threshold
+        and support_prob is not None
+        and no_strong_cues
+        and risk_score <= -0.6
+        and bool(routine_message_keys & reassurance_keys)
+        and support_prob <= max(0.55, threshold - 0.05)
+        and 'domain_mismatch' not in risk_keys
+        and 'suspicious_link' not in risk_keys
+    ):
+        main_label = "Legitimate"
+        level = "review"
+        display_prob = min(support_prob, max(0.0, threshold - 0.01))
+        decision_basis = 'routine_message_override'
     elif prob >= threshold:
         main_label = "Phishing"
         level = "high" if prob >= max(0.80, threshold + 0.20) else "medium"
@@ -217,12 +334,15 @@ def compute_user_verdict(result, rules: dict, support_result=None):
     }
 
 
-def build_model_input(body: str, subject: str = '', sender_email: str = '') -> str:
+def build_model_input(body: str, subject: str = '', sender_email: str = '', sender_context: str = '') -> str:
     parts = []
-    sender = (sender_email or '').strip()
-    subj = (subject or '').strip()
-    body_text = (body or '').strip()
+    sender = normalize_message_text(sender_email)
+    sender_display = normalize_message_text(sender_context)
+    subj = normalize_message_text(subject)
+    body_text = normalize_message_text(body)
 
+    if sender_display and sender_display != sender:
+        parts.append(f'Sender: {sender_display}')
     if sender:
         parts.append(f'From: {sender}')
     if subj:
@@ -315,12 +435,12 @@ def get_distilbert_predictor():
     return DistilBertPredictor()
 
 
-st.set_page_config(page_title='Veridexia - AI-Based Phishing Detection', layout='wide')
+st.set_page_config(page_title='Veridexia', layout='wide')
 inject_custom_css()
-st.title('Veridexia - AI-Based Phishing Detection')
+st.title('Veridexia: ML-Based Phishing Detection')
 
 if 'model_choice' not in st.session_state:
-    st.session_state.model_choice = 'baseline'
+    st.session_state.model_choice = 'distilbert'
 if 'threshold' not in st.session_state:
     st.session_state.threshold = 0.65
 if 'detection_sensitivity' not in st.session_state:
@@ -331,6 +451,14 @@ if 'advanced_mode' not in st.session_state:
     st.session_state.advanced_mode = False
 if 'last_result' not in st.session_state:
     st.session_state.last_result = None
+if 'scan_sender_email' not in st.session_state:
+    st.session_state.scan_sender_email = ''
+if 'scan_subject' not in st.session_state:
+    st.session_state.scan_subject = ''
+if 'scan_email_text' not in st.session_state:
+    st.session_state.scan_email_text = ''
+if 'scan_sender_context' not in st.session_state:
+    st.session_state.scan_sender_context = ''
 
 with st.sidebar:
     st.header('Quick Controls')
@@ -364,11 +492,11 @@ with st.sidebar:
     st.session_state.threshold = threshold_for_sensitivity(st.session_state.detection_sensitivity)
 
 
-tab_dashboard, tab_scan, tab_analysis, tab_settings = st.tabs(
-    ['Dashboard', 'Scan Email', 'Model Analysis', 'Settings']
+tab_scan, tab_overview, tab_analysis, tab_settings = st.tabs(
+    ['Scan Email', 'Dashboard', 'Model Analysis', 'Settings']
 )
 
-with tab_dashboard:
+with tab_overview:
     col1, col2 = st.columns([1.2, 1])
 
     baseline_metrics = load_json(BASELINE_METRICS)
@@ -459,14 +587,49 @@ with tab_dashboard:
 
 with tab_scan:
     st.subheader('Scan Email')
-    st.caption('Paste the body of an email and optionally the sender email and subject line. The classifier makes the decision and the explanation layer explains it using grounded evidence.')
+    st.caption('Paste the body of an email or upload exported email files or previously saved readable documents. Any extracted text is analysed together with the sender email and subject when available.')
 
     left, right = st.columns([1.15, 1])
 
     with left:
-        sender_email = st.text_input('Sender email')
-        subject_line = st.text_input('Subject')
-        email_text = st.text_area('Paste email content here', height=280)
+        st.markdown('**Sender email**')
+        sender_email = st.text_input('Sender email', key='scan_sender_email', label_visibility='collapsed')
+        st.markdown('**Subject**')
+        subject_line = st.text_input('Subject', key='scan_subject', label_visibility='collapsed')
+        st.markdown('**Email Content**')
+        email_text = st.text_area('Email Content', height=280, key='scan_email_text', label_visibility='collapsed')
+        st.markdown('**Upload exported emails or readable documents**')
+        uploaded_files = st.file_uploader(
+            'Upload exported emails or readable documents',
+            type=[
+                'txt', 'text', 'md', 'rst', 'log', 'csv', 'tsv', 'json',
+                'yaml', 'yml', 'ini', 'cfg', 'xml', 'html', 'htm',
+                'docx', 'pdf', 'eml',
+                'png', 'jpg', 'jpeg', 'bmp', 'gif', 'webp', 'tif', 'tiff',
+            ],
+            accept_multiple_files=True,
+            label_visibility='collapsed',
+            help='Do not open or run suspicious attachments just to analyse them here. Where possible, use exported .eml files or previously saved readable documents.',
+        )
+        upload_context = build_upload_context(uploaded_files)
+        st.caption('Safety note: avoid downloading or opening unknown live attachments.')
+
+        if upload_context.items:
+            st.caption(f'Loaded {len(upload_context.items)} uploaded file(s) for analysis.')
+            for item in upload_context.items:
+                extraction_mode = item.kind.upper()
+                if item.text:
+                    st.caption(f'{item.filename}: {extraction_mode} text extracted')
+                else:
+                    st.caption(f'{item.filename}: uploaded, but no readable text extracted yet')
+
+        if upload_context.subject and not subject_line.strip():
+            st.caption(f"Detected subject from upload: {upload_context.subject}")
+        if upload_context.sender_email and not sender_email.strip():
+            st.caption(f"Detected sender from upload: {upload_context.sender_email}")
+
+        for warning in upload_context.warnings:
+            st.info(warning)
 
         run = st.button('Analyze', type='primary', use_container_width=True)
 
@@ -478,9 +641,29 @@ with tab_scan:
             threshold = float(st.session_state.threshold)
             show_explain = bool(st.session_state.show_explain)
             advanced_mode = bool(st.session_state.advanced_mode)
-            model_input = build_model_input(email_text, subject=subject_line, sender_email=sender_email)
+            effective_sender = (sender_email or '').strip() or upload_context.sender_email
+            effective_sender_context = (
+                st.session_state.scan_sender_context.strip()
+                if isinstance(st.session_state.scan_sender_context, str)
+                else ''
+            )
+            if effective_sender and effective_sender_context and effective_sender not in effective_sender_context:
+                effective_sender_context = f'{effective_sender_context} <{effective_sender}>'
+            effective_subject = (subject_line or '').strip() or upload_context.subject
+            combined_body = '\n\n'.join(
+                part for part in [email_text.strip(), upload_context.body_text] if part
+            ).strip()
+            combined_body = normalize_message_text(combined_body)
+            effective_sender = normalize_message_text(effective_sender)
+            effective_subject = normalize_message_text(effective_subject)
+            model_input = build_model_input(
+                combined_body,
+                subject=effective_subject,
+                sender_email=effective_sender,
+                sender_context=effective_sender_context,
+            )
             if not model_input.strip():
-                st.warning('Paste some email content first.')
+                st.warning('Paste some email content or upload a file with readable text first.')
                 st.stop()
 
             start = time.time()
@@ -499,7 +682,7 @@ with tab_scan:
                 support_result = support_predictor.predict(model_input, threshold=threshold)
                 support_evidence = baseline_evidence(model_input, support_predictor)
 
-            rules = rule_based_evidence(email_text, sender_email=sender_email, subject=subject_line)
+            rules = rule_based_evidence(combined_body, sender_email=effective_sender, subject=effective_subject)
             verdict = compute_user_verdict(result, rules, support_result=support_result)
             p_phish = float(verdict.get('display_prob', result.prob_phishing))
             ms = (time.time() - start) * 1000.0
@@ -515,21 +698,17 @@ with tab_scan:
                 display_label=verdict['label'],
                 display_prob=p_phish,
             )
-            review_text = ' | Manual review recommended' if verdict['review_recommended'] else ''
-            sensitivity_label = st.session_state.detection_sensitivity
 
             st.markdown(
                 f"""
                 <div class="result-card">
                     <div class="result-label">{verdict['label']}</div>
-                    <div class="result-meta">
-                        Probability: {p_phish:.2f} | Sensitivity: {sensitivity_label}
-                        | Confidence: {confidence_label(p_phish, result.threshold)}{review_text}
-                    </div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
+            if verdict['review_recommended']:
+                st.warning('Manual review is recommended for this message.')
 
             if show_explain:
                 safe_summary = escape(summary).replace('\n', '<br>')
@@ -549,6 +728,8 @@ with tab_scan:
 
             st.progress(min(max(p_phish, 0.0), 1.0))
             st.caption(f'Model: {result.model_name} | Inference time: {ms:.1f} ms')
+            if uploaded_files:
+                st.caption(f'Uploaded sources included: {len(uploaded_files)}')
 
             if advanced_mode:
                 st.divider()
@@ -562,6 +743,9 @@ with tab_scan:
                     'threshold': result.threshold,
                     'model_name': result.model_name,
                     'decision_basis': verdict.get('decision_basis'),
+                    'effective_sender_email': effective_sender,
+                    'effective_subject': effective_subject,
+                    'uploaded_files': [item.filename for item in upload_context.items],
                     'rule_evidence': rules,
                     'model_evidence': evidence,
                     'support_model_evidence': support_evidence,
@@ -583,61 +767,116 @@ with tab_scan:
             st.info('Example output: Likely phishing / Suspicious - review recommended / Likely legitimate')
 
 with tab_analysis:
-    st.subheader('Model Analysis & Comparison (External: TREC-06)')
+    st.markdown('<h2>Model Analysis & Comparison</h2>', unsafe_allow_html=True)
 
+    if MODEL_COMPARISON_IMG.exists():
+        st.markdown('### Main comparison figure')
+        st.image(str(MODEL_COMPARISON_IMG), use_container_width=True)
+        st.divider()
+
+    baseline_internal_metrics = load_json(BASELINE_INTERNAL_METRICS)
+    distilbert_internal_metrics = load_json(DISTILBERT_INTERNAL_METRICS)
     baseline_metrics = load_json(BASELINE_METRICS)
     distilbert_metrics = load_json(DISTILBERT_METRICS)
-    rows = []
+    training_rows = []
+    external_rows = []
 
-    if baseline_metrics:
-        k = get_external_kpis(baseline_metrics)
+    if baseline_internal_metrics:
+        k = get_internal_kpis(baseline_internal_metrics)
         if k:
-            rows.append({
+            training_rows.append({
                 'Model': 'Baseline (TF-IDF + Logistic Regression)',
                 'Accuracy': k.get('accuracy'),
                 'Precision (phish)': k.get('precision_phish'),
                 'Recall (phish)': k.get('recall_phish'),
                 'F1 (phish)': k.get('f1_phish'),
+                'False positive rate': k.get('false_positive_rate'),
+                'False negative rate': k.get('false_negative_rate'),
             })
 
-    if distilbert_metrics:
-        k = get_external_kpis(distilbert_metrics)
+    if distilbert_internal_metrics:
+        k = get_internal_kpis(distilbert_internal_metrics)
         if k:
-            rows.append({
+            training_rows.append({
                 'Model': 'DistilBERT',
                 'Accuracy': k.get('accuracy'),
                 'Precision (phish)': k.get('precision_phish'),
                 'Recall (phish)': k.get('recall_phish'),
                 'F1 (phish)': k.get('f1_phish'),
+                'False positive rate': k.get('false_positive_rate'),
+                'False negative rate': k.get('false_negative_rate'),
             })
 
-    if rows:
-        df = pd.DataFrame(rows)
-        for col in ['Accuracy', 'Precision (phish)', 'Recall (phish)', 'F1 (phish)']:
-            df[col] = df[col].apply(lambda x: fmt_pct(x) if isinstance(x, (int, float)) else '-')
-        html = df.to_html(index=False)
-        st.markdown(f"<div class='big-table'>{html}</div>", unsafe_allow_html=True)
+    if baseline_metrics:
+        k = get_external_kpis(baseline_metrics)
+        if k:
+            external_rows.append({
+                'Model': 'Baseline (TF-IDF + Logistic Regression)',
+                'Accuracy': k.get('accuracy'),
+                'Precision (phish)': k.get('precision_phish'),
+                'Recall (phish)': k.get('recall_phish'),
+                'F1 (phish)': k.get('f1_phish'),
+                'False positive rate': k.get('false_positive_rate'),
+                'False negative rate': k.get('false_negative_rate'),
+            })
+
+    if distilbert_metrics:
+        k = get_external_kpis(distilbert_metrics)
+        if k:
+            external_rows.append({
+                'Model': 'DistilBERT',
+                'Accuracy': k.get('accuracy'),
+                'Precision (phish)': k.get('precision_phish'),
+                'Recall (phish)': k.get('recall_phish'),
+                'F1 (phish)': k.get('f1_phish'),
+            'False positive rate': k.get('false_positive_rate'),
+            'False negative rate': k.get('false_negative_rate'),
+        })
+
+    if training_rows:
+        st.markdown('### Model training results (Kaggle)')
+        render_metrics_table(training_rows)
+        st.caption('These are the original split results saved from the model training artefacts. They provide an in-domain benchmark before external validation on a separate dataset.')
+        st.divider()
+
+    st.markdown('### External validation results (TREC-06)')
+    if external_rows:
+        render_metrics_table(external_rows)
+        st.caption('These results show model performance on a separate external dataset and therefore provide a more realistic indication of generalisation')
     else:
         st.info('External metrics not found yet. Add files to results/external/.')
 
     st.divider()
+    st.markdown('### Confusion matrices: model training results (Kaggle)')
     c1, c2 = st.columns(2)
 
     with c1:
-        st.subheader('Baseline visual (external)')
+        if BASELINE_INTERNAL_CM_IMG.exists():
+            st.image(str(BASELINE_INTERNAL_CM_IMG), use_container_width=True)
+        else:
+            st.caption('Baseline internal confusion matrix image not found.')
+
+    with c2:
+        if DISTILBERT_INTERNAL_CM_IMG.exists():
+            st.image(str(DISTILBERT_INTERNAL_CM_IMG), use_container_width=True)
+        else:
+            st.caption('DistilBERT internal confusion matrix image not found.')
+
+    st.divider()
+    st.markdown('### Confusion matrices: external validation (TREC-06)')
+    c1, c2 = st.columns(2)
+
+    with c1:
         if BASELINE_CM_IMG.exists():
             st.image(str(BASELINE_CM_IMG), use_container_width=True)
         else:
             st.caption('Baseline confusion matrix image not found.')
 
     with c2:
-        st.subheader('DistilBERT visual (external)')
         if DISTILBERT_CM_IMG.exists():
             st.image(str(DISTILBERT_CM_IMG), use_container_width=True)
         else:
             st.caption('DistilBERT confusion matrix image not found.')
-
-    st.caption('ROC curve and feature-importance plots are hidden in external-validation view.')
 
 with tab_settings:
     st.subheader('Settings')
@@ -653,23 +892,15 @@ with tab_settings:
 
     st.divider()
     st.markdown('### Scan tips')
-    st.write('Include the sender email and subject when you have them. They improve the final decision logic.')
-    st.write('Paste the full email body instead of a short extract. Partial messages are easier to misclassify.')
-    st.write('Treat "review recommended" as a caution signal, even when the final label is legitimate.')
-
-    st.divider()
-    st.markdown('### Detection sensitivity presets')
-    if st.button('Low sensitivity'):
-        st.session_state.detection_sensitivity = 'Low'
-        st.session_state.threshold = threshold_for_sensitivity('Low')
-    if st.button('Balanced'):
-        st.session_state.detection_sensitivity = 'Balanced'
-        st.session_state.threshold = threshold_for_sensitivity('Balanced')
-    if st.button('High sensitivity'):
-        st.session_state.detection_sensitivity = 'High'
-        st.session_state.threshold = threshold_for_sensitivity('High')
-    if st.button('Debug-friendly'):
-        st.session_state.advanced_mode = True
-        st.session_state.show_explain = True
+    st.markdown(
+        """
+        - Include the sender email and subject when you have them. They help the scan use more context.
+        - Use the full message where possible rather than a short extract.
+        - Uploaded files work best for exported emails or readable documents such as `.eml`, `.txt`, `.docx`, or `.pdf`.
+        - Avoid downloading or opening unknown live attachments just to analyse them in the demo.
+        - Newsletters, job alerts, and account notices can still trigger review warnings, so read the explanation as well as the final label.
+        - Treat `review recommended` as a caution signal, even when the final label is legitimate.
+        """
+    )
 
 
