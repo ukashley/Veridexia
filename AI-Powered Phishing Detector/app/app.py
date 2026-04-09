@@ -1,5 +1,6 @@
 ﻿# pyright: reportMissingImports=false
 
+from dataclasses import asdict
 import sys
 from pathlib import Path
 import json
@@ -17,6 +18,7 @@ if str(ROOT) not in sys.path:
 
 from src.inference.baseline import BaselinePredictor
 from src.inference.distilbert import DistilBertPredictor
+from src.inference.gmail_import import import_recent_gmail_messages
 from src.inference.upload_extractors import build_upload_context
 from src.explain.baseline_evidence import baseline_evidence
 from src.explain.nlg import generate_explanation
@@ -26,6 +28,8 @@ DATASET_STATS = ROOT / 'data' / 'processed' / 'dataset_stats.json'
 BASELINE_DIR = ROOT / 'models' / 'baseline'
 DISTILBERT_DIR = ROOT / 'models' / 'distilbert'
 RESULTS_DIR = ROOT / 'results' / 'external'
+GOOGLE_CREDENTIALS = ROOT / 'credentials.json'
+GOOGLE_TOKEN = ROOT / 'token.json'
 
 BASELINE_METRICS = RESULTS_DIR / 'trec06_baseline_metrics.json'
 DISTILBERT_METRICS = RESULTS_DIR / 'trec06_distilbert_metrics.json'
@@ -162,6 +166,15 @@ def severity_color(level: str):
         'review': 'Needs review',
         'low': 'Low risk',
     }.get(level, 'Needs review')
+
+
+def format_gmail_message_label(item: dict) -> str:
+    subject = (item.get('subject') or '(no subject)').strip()
+    sender = (item.get('sender_email') or item.get('sender_label') or 'unknown sender').strip()
+    received = (item.get('received_at') or '').strip()
+    if received:
+        return f'{subject} - {sender} ({received})'
+    return f'{subject} - {sender}'
 
 
 def friendly_model_name(model_name: str) -> str:
@@ -459,14 +472,24 @@ if 'scan_email_text' not in st.session_state:
     st.session_state.scan_email_text = ''
 if 'scan_sender_context' not in st.session_state:
     st.session_state.scan_sender_context = ''
+if 'gmail_messages' not in st.session_state:
+    st.session_state.gmail_messages = []
+if 'gmail_import_warnings' not in st.session_state:
+    st.session_state.gmail_import_warnings = []
+if 'gmail_import_status' not in st.session_state:
+    st.session_state.gmail_import_status = ''
+if 'gmail_selected_index' not in st.session_state:
+    st.session_state.gmail_selected_index = 0
+if 'gmail_max_results' not in st.session_state:
+    st.session_state.gmail_max_results = 5
 
 with st.sidebar:
     st.header('Quick Controls')
     st.session_state.model_choice = st.selectbox(
         'Model',
-        ['baseline', 'distilbert'],
-        index=0 if st.session_state.model_choice == 'baseline' else 1,
-        help='Choose which classifier makes the prediction. Baseline is the default because it currently performs better on the external test set. DistilBERT remains available for comparison.',
+        ['distilbert', 'baseline'],
+        index=0 if st.session_state.model_choice == 'distilbert' else 1,
+        help="Choose which classifier makes the prediction. DistilBERT is the project's main transformer-based model, while the baseline remains available for comparison.",
     )
     st.session_state.show_explain = st.toggle(
         'Show explanation',
@@ -493,7 +516,7 @@ with st.sidebar:
 
 
 tab_scan, tab_overview, tab_analysis, tab_settings = st.tabs(
-    ['Scan Email', 'Dashboard', 'Model Analysis', 'Settings']
+    ['Scan Email', 'Overview', 'Model Analysis', 'Guide']
 )
 
 with tab_overview:
@@ -587,11 +610,72 @@ with tab_overview:
 
 with tab_scan:
     st.subheader('Scan Email')
-    st.caption('Paste the body of an email or upload exported email files or previously saved readable documents. Any extracted text is analysed together with the sender email and subject when available.')
+    st.caption('Paste the body of an email or upload exported email files or previously saved readable documents. The classifier uses any extracted text together with the sender email and subject when available.')
 
     left, right = st.columns([1.15, 1])
 
     with left:
+        st.markdown('#### Gmail import')
+        st.caption('Import recent emails from your Gmail inbox to fill the form automatically. The first time you use this, Google will ask you to sign in.')
+        st.markdown('**Recent inbox emails**')
+        gmail_col1, gmail_col2 = st.columns([1, 1])
+        with gmail_col1:
+            st.selectbox(
+                'Recent inbox emails',
+                options=[5, 10, 20],
+                key='gmail_max_results',
+                label_visibility='collapsed',
+                help='Choose how many recent inbox messages to fetch from Gmail.',
+            )
+        with gmail_col2:
+            import_gmail = st.button('Import recent emails', type='primary', use_container_width=True)
+
+        if import_gmail:
+            gmail_result = import_recent_gmail_messages(
+                GOOGLE_CREDENTIALS,
+                GOOGLE_TOKEN,
+                max_results=int(st.session_state.gmail_max_results),
+            )
+            st.session_state.gmail_messages = [asdict(item) for item in gmail_result.items]
+            st.session_state.gmail_import_warnings = gmail_result.warnings
+            if gmail_result.items:
+                st.session_state.gmail_selected_index = 0
+                first_item = st.session_state.gmail_messages[0]
+                st.session_state.scan_sender_email = first_item.get('sender_email', '')
+                st.session_state.scan_sender_context = first_item.get('sender_label') or first_item.get('sender_email', '')
+                st.session_state.scan_subject = first_item.get('subject', '')
+                st.session_state.scan_email_text = first_item.get('body_text') or first_item.get('snippet', '')
+                st.session_state.gmail_import_status = (
+                    f"Imported {len(gmail_result.items)} inbox email(s). "
+                    'The first message has been loaded into the scan form.'
+                )
+            else:
+                st.session_state.gmail_import_status = 'No Gmail messages were imported.'
+
+        if st.session_state.gmail_import_status:
+            st.success(st.session_state.gmail_import_status)
+
+        for warning in st.session_state.gmail_import_warnings:
+            st.info(warning)
+
+        if st.session_state.gmail_messages:
+            st.markdown('**Imported Gmail messages**')
+            st.selectbox(
+                'Imported Gmail messages',
+                options=list(range(len(st.session_state.gmail_messages))),
+                index=min(st.session_state.gmail_selected_index, len(st.session_state.gmail_messages) - 1),
+                format_func=lambda idx: format_gmail_message_label(st.session_state.gmail_messages[idx]),
+                key='gmail_selected_index',
+                label_visibility='collapsed',
+            )
+            if st.button('Load selected email', type='primary', use_container_width=True):
+                selected_message = st.session_state.gmail_messages[st.session_state.gmail_selected_index]
+                st.session_state.scan_sender_email = selected_message.get('sender_email', '')
+                st.session_state.scan_sender_context = selected_message.get('sender_label') or selected_message.get('sender_email', '')
+                st.session_state.scan_subject = selected_message.get('subject', '')
+                st.session_state.scan_email_text = selected_message.get('body_text') or selected_message.get('snippet', '')
+                st.rerun()
+
         st.markdown('**Sender email**')
         sender_email = st.text_input('Sender email', key='scan_sender_email', label_visibility='collapsed')
         st.markdown('**Subject**')
@@ -769,11 +853,6 @@ with tab_scan:
 with tab_analysis:
     st.markdown('<h2>Model Analysis & Comparison</h2>', unsafe_allow_html=True)
 
-    if MODEL_COMPARISON_IMG.exists():
-        st.markdown('### Main comparison figure')
-        st.image(str(MODEL_COMPARISON_IMG), use_container_width=True)
-        st.divider()
-
     baseline_internal_metrics = load_json(BASELINE_INTERNAL_METRICS)
     distilbert_internal_metrics = load_json(DISTILBERT_INTERNAL_METRICS)
     baseline_metrics = load_json(BASELINE_METRICS)
@@ -879,7 +958,7 @@ with tab_analysis:
             st.caption('DistilBERT confusion matrix image not found.')
 
 with tab_settings:
-    st.subheader('Settings')
+    st.subheader('Guide')
     st.write('This page summarises the current app profile and gives a few practical tips for cleaner scans.')
 
     c1, c2, c3, c4 = st.columns(4)
@@ -896,6 +975,7 @@ with tab_settings:
         """
         - Include the sender email and subject when you have them. They help the scan use more context.
         - Use the full message where possible rather than a short extract.
+        - Gmail import is useful for testing realistic inbox emails without copying and pasting each message manually.
         - Uploaded files work best for exported emails or readable documents such as `.eml`, `.txt`, `.docx`, or `.pdf`.
         - Avoid downloading or opening unknown live attachments just to analyse them in the demo.
         - Newsletters, job alerts, and account notices can still trigger review warnings, so read the explanation as well as the final label.
