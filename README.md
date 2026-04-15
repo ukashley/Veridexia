@@ -102,4 +102,4 @@ The application also uses a rule-supported evidence layer to identify visible si
 The project was developed iteratively using sprints. Commits were generally made after completing a sprint or meaningful project milestones, rather than after every small local edit. As a result, the commit history is less clustered with micro commits.
 
 ## Security And Privacy Notes
-This is a local prototype rather than a production email security product. It does not continuously monitor inboxes, quarantine emails, or perform live enterprise deployment.
+This is a local application rather than a production email security product. It does not continuously monitor inboxes, quarantine emails, or perform live enterprise deployment.
