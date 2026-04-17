@@ -1,3 +1,19 @@
 .streamlit/secrets.toml
 credentials.json
 token.json
+
+# Local Python environment and caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Local archives and generated large artefacts
+*.zip
+data/*.csv
+data/processed/*.csv
+data/processed/tokenized/
+models/distilbert/final_model/model.safetensors
+models/distilbert/checkpoints/
+models/distilbert/logs/

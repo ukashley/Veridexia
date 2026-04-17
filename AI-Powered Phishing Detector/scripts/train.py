@@ -5,7 +5,6 @@ Handles class imbalance with weighted loss, saves best model, and logs metrics.
 """
 
 import torch
-from torch.utils.data import DataLoader
 from datasets import load_from_disk
 from transformers import (
     AutoModelForSequenceClassification,
@@ -21,9 +20,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-if __name__ == '__main__':
-    # Paths
-    TOK_DIR = Path("data/processed/tokenized")
+# Paths
+TOK_DIR = Path("data/processed/tokenized")
 MODEL_DIR = Path("models/distilbert")
 STATS_FILE = Path("data/processed/dataset_stats.json")
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -141,8 +139,9 @@ training_args = TrainingArguments(
     
     # Training hyperparameters
     num_train_epochs=4,
-    per_device_train_batch_size=16,
+    per_device_train_batch_size=8,
     per_device_eval_batch_size=32,
+    gradient_accumulation_steps=2,
     learning_rate=2e-5,
     weight_decay=0.01,
     warmup_ratio=0.1,
@@ -172,7 +171,9 @@ training_args = TrainingArguments(
 
 print(f"[OK] Training configuration:")
 print(f"  - Epochs: {training_args.num_train_epochs}")
-print(f"  - Batch size: {training_args.per_device_train_batch_size}")
+print(f"  - Train batch size: {training_args.per_device_train_batch_size}")
+print(f"  - Gradient accumulation: {training_args.gradient_accumulation_steps}")
+print(f"  - Effective batch size: {training_args.per_device_train_batch_size * training_args.gradient_accumulation_steps}")
 print(f"  - Learning rate: {training_args.learning_rate}")
 print(f"  - Device: {'GPU (fp16)' if training_args.fp16 else 'CPU'}")
 
@@ -262,7 +263,9 @@ all_metrics = {
     "model": "distilbert-base-uncased",
     "training": {
         "epochs": training_args.num_train_epochs,
-        "batch_size": training_args.per_device_train_batch_size,
+        "train_batch_size": training_args.per_device_train_batch_size,
+        "grad_accumulation": training_args.gradient_accumulation_steps,
+        "effective_batch_size": training_args.per_device_train_batch_size * training_args.gradient_accumulation_steps,
         "learning_rate": training_args.learning_rate,
         "train_loss": float(train_result.metrics['train_loss']),
         "train_runtime": float(train_result.metrics['train_runtime'])
