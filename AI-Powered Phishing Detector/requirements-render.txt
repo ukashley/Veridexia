@@ -1,0 +1,8 @@
+streamlit
+pandas
+numpy
+scikit-learn==1.6.1
+beautifulsoup4
+Pillow
+pypdf
+

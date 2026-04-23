@@ -17,7 +17,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.inference.baseline import BaselinePredictor
-from src.inference.distilbert import DistilBertPredictor
 from src.inference.gmail_import import import_recent_gmail_messages
 from src.inference.upload_extractors import build_upload_context
 from src.explain.baseline_evidence import baseline_evidence
@@ -30,6 +29,15 @@ DISTILBERT_DIR = ROOT / 'models' / 'distilbert'
 RESULTS_DIR = ROOT / 'results' / 'external'
 GOOGLE_CREDENTIALS = ROOT / 'credentials.json'
 GOOGLE_TOKEN = ROOT / 'token.json'
+DISTILBERT_MODEL_DIR = DISTILBERT_DIR / 'final_model'
+DISTILBERT_REQUIRED_FILES = (
+    'config.json',
+    'special_tokens_map.json',
+    'tokenizer.json',
+    'tokenizer_config.json',
+    'vocab.txt',
+    'model.safetensors',
+)
 
 BASELINE_METRICS = RESULTS_DIR / 'trec06_baseline_metrics.json'
 DISTILBERT_METRICS = RESULTS_DIR / 'trec06_distilbert_metrics.json'
@@ -196,6 +204,17 @@ def confidence_label(prob: float, threshold: float):
 
 def threshold_for_sensitivity(level: str) -> float:
     return float(SENSITIVITY_THRESHOLDS.get(level, SENSITIVITY_THRESHOLDS['Balanced']))
+
+
+def distilbert_assets_available(model_dir: Path = DISTILBERT_MODEL_DIR) -> bool:
+    return all((model_dir / filename).exists() for filename in DISTILBERT_REQUIRED_FILES)
+
+
+def available_model_choices() -> list[str]:
+    choices = ['baseline']
+    if distilbert_assets_available():
+        choices.insert(0, 'distilbert')
+    return choices
 
 
 def normalize_message_text(text: str) -> str:
@@ -532,6 +551,9 @@ def get_baseline_predictor():
 
 @st.cache_resource
 def get_distilbert_predictor():
+    if not distilbert_assets_available():
+        raise RuntimeError('DistilBERT weights are not available in this deployment.')
+    from src.inference.distilbert import DistilBertPredictor
     return DistilBertPredictor()
 
 
@@ -539,8 +561,12 @@ st.set_page_config(page_title='Veridexia', layout='wide')
 inject_custom_css()
 st.title('Veridexia: ML-Based Phishing Detection')
 
+model_choices = available_model_choices()
+distilbert_enabled = 'distilbert' in model_choices
+gmail_enabled = GOOGLE_CREDENTIALS.exists()
+
 if 'model_choice' not in st.session_state:
-    st.session_state.model_choice = 'distilbert'
+    st.session_state.model_choice = 'distilbert' if distilbert_enabled else 'baseline'
 if 'threshold' not in st.session_state:
     st.session_state.threshold = 0.65
 if 'detection_sensitivity' not in st.session_state:
@@ -572,14 +598,19 @@ if 'gmail_selected_index' not in st.session_state:
 if 'gmail_max_results' not in st.session_state:
     st.session_state.gmail_max_results = 5
 
+if st.session_state.model_choice not in model_choices:
+    st.session_state.model_choice = model_choices[0]
+
 with st.sidebar:
     st.header('Quick Controls')
     st.session_state.model_choice = st.selectbox(
         'Model',
-        ['distilbert', 'baseline'],
-        index=0 if st.session_state.model_choice == 'distilbert' else 1,
+        model_choices,
+        index=model_choices.index(st.session_state.model_choice),
         help="Choose which classifier makes the prediction. DistilBERT is the project's main transformer-based model, while the baseline remains available for comparison.",
     )
+    if not distilbert_enabled:
+        st.caption('This deployment is using the baseline model for live predictions because the DistilBERT weights are not bundled here.')
     st.session_state.show_explain = st.toggle(
         'Show explanation',
         value=st.session_state.show_explain,
@@ -705,61 +736,65 @@ with tab_scan:
 
     with left:
         st.markdown('#### Gmail import')
-        st.caption('Import recent emails from your Gmail inbox to fill the form automatically. The first time you use this, Google will ask you to sign in.')
-        st.markdown('**Recent inbox emails**')
-        gmail_col1, gmail_col2 = st.columns([1, 1])
-        with gmail_col1:
-            st.selectbox(
-                'Recent inbox emails',
-                options=[5, 10, 20],
-                key='gmail_max_results',
-                label_visibility='collapsed',
-                help='Choose how many recent inbox messages to fetch from Gmail.',
-            )
-        with gmail_col2:
-            import_gmail = st.button('Import recent emails', type='primary', use_container_width=True)
-
-        if import_gmail:
-            gmail_result = import_recent_gmail_messages(
-                GOOGLE_CREDENTIALS,
-                GOOGLE_TOKEN,
-                max_results=int(st.session_state.gmail_max_results),
-            )
-            st.session_state.gmail_messages = [asdict(item) for item in gmail_result.items]
-            st.session_state.gmail_import_warnings = gmail_result.warnings
-            if gmail_result.items:
-                st.session_state.gmail_selected_index = 0
-                first_item = st.session_state.gmail_messages[0]
-                st.session_state.scan_sender_email = first_item.get('sender_email', '')
-                st.session_state.scan_sender_context = first_item.get('sender_label') or first_item.get('sender_email', '')
-                st.session_state.scan_subject = first_item.get('subject', '')
-                st.session_state.scan_email_text = first_item.get('body_text') or first_item.get('snippet', '')
-                st.session_state.gmail_import_status = (
-                    f"Imported {len(gmail_result.items)} inbox email(s). "
-                    'The first message has been loaded into the scan form.'
+        if gmail_enabled:
+            st.caption('Import recent emails from your Gmail inbox to fill the form automatically. The first time you use this, Google will ask you to sign in.')
+            st.markdown('**Recent inbox emails**')
+            gmail_col1, gmail_col2 = st.columns([1, 1])
+            with gmail_col1:
+                st.selectbox(
+                    'Recent inbox emails',
+                    options=[5, 10, 20],
+                    key='gmail_max_results',
+                    label_visibility='collapsed',
+                    help='Choose how many recent inbox messages to fetch from Gmail.',
                 )
-                st.session_state.gmail_import_status_type = 'success'
-            else:
-                if gmail_result.warnings:
-                    st.session_state.gmail_import_status = 'Gmail import could not be completed.'
-                    st.session_state.gmail_import_status_type = 'warning'
+            with gmail_col2:
+                import_gmail = st.button('Import recent emails', type='primary', use_container_width=True)
+
+            if import_gmail:
+                gmail_result = import_recent_gmail_messages(
+                    GOOGLE_CREDENTIALS,
+                    GOOGLE_TOKEN,
+                    max_results=int(st.session_state.gmail_max_results),
+                )
+                st.session_state.gmail_messages = [asdict(item) for item in gmail_result.items]
+                st.session_state.gmail_import_warnings = gmail_result.warnings
+                if gmail_result.items:
+                    st.session_state.gmail_selected_index = 0
+                    first_item = st.session_state.gmail_messages[0]
+                    st.session_state.scan_sender_email = first_item.get('sender_email', '')
+                    st.session_state.scan_sender_context = first_item.get('sender_label') or first_item.get('sender_email', '')
+                    st.session_state.scan_subject = first_item.get('subject', '')
+                    st.session_state.scan_email_text = first_item.get('body_text') or first_item.get('snippet', '')
+                    st.session_state.gmail_import_status = (
+                        f"Imported {len(gmail_result.items)} inbox email(s). "
+                        'The first message has been loaded into the scan form.'
+                    )
+                    st.session_state.gmail_import_status_type = 'success'
                 else:
-                    st.session_state.gmail_import_status = 'No Gmail messages were imported.'
-                    st.session_state.gmail_import_status_type = 'info'
+                    if gmail_result.warnings:
+                        st.session_state.gmail_import_status = 'Gmail import could not be completed.'
+                        st.session_state.gmail_import_status_type = 'warning'
+                    else:
+                        st.session_state.gmail_import_status = 'No Gmail messages were imported.'
+                        st.session_state.gmail_import_status_type = 'info'
 
-        if st.session_state.gmail_import_status:
-            status_type = st.session_state.gmail_import_status_type
-            if status_type == 'success':
-                st.success(st.session_state.gmail_import_status)
-            elif status_type == 'warning':
-                st.warning(st.session_state.gmail_import_status)
-            else:
-                st.info(st.session_state.gmail_import_status)
+            if st.session_state.gmail_import_status:
+                status_type = st.session_state.gmail_import_status_type
+                if status_type == 'success':
+                    st.success(st.session_state.gmail_import_status)
+                elif status_type == 'warning':
+                    st.warning(st.session_state.gmail_import_status)
+                else:
+                    st.info(st.session_state.gmail_import_status)
 
-        for warning in st.session_state.gmail_import_warnings:
-            st.warning(warning)
+            for warning in st.session_state.gmail_import_warnings:
+                st.warning(warning)
+        else:
+            st.caption('Gmail import is not enabled in this deployment because Google OAuth credentials are not configured.')
+            import_gmail = False
 
-        if st.session_state.gmail_messages:
+        if gmail_enabled and st.session_state.gmail_messages:
             st.markdown('**Imported Gmail messages**')
             st.selectbox(
                 'Imported Gmail messages',
