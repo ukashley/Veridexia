@@ -9,10 +9,12 @@ class DistilBertPredictor:
         self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
         self.model = AutoModelForSequenceClassification.from_pretrained(model_dir)
         self.model.eval()
+        # The model is small enough to run on CPU for the demo, but we still take GPU if it is there.
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
 
     def predict(self, text: str, threshold: float = 0.5, max_length: int = 256) -> PredictionResult:
+        # The training pipeline used 256 tokens, so we keep inference aligned with that setup.
         enc = self.tokenizer(text, truncation=True, padding=True, max_length=max_length, return_tensors="pt")
         enc = {k: v.to(self.device) for k, v in enc.items()}
         with torch.no_grad():

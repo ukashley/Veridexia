@@ -1,7 +1,7 @@
 """
 prepare_dataset.py:
 Loads a single CSV dataset (phishing_email.csv), cleans text,
-splits into train/val/test, tokenizes with DistilBERT, and
+splits into train/val/test, tokenizes with DistilBERT and
 saves processed data for training.
 """
 
@@ -28,7 +28,8 @@ df.columns = [c.lower().strip() for c in df.columns]
 print(f"[INFO] Columns detected: {list(df.columns)}")
 print(f"[INFO] Initial rows: {len(df)}")
 
-# Detect text column
+# Try a few common column names first so the script can cope with small dataset
+# variations without needing manual edits every time.
 text_col = None
 for c in ["text", "email_text", "message", "content", "body"]:
     if c in df.columns:
@@ -44,7 +45,8 @@ if text_col is None:
         df["text"] = df.select_dtypes(include="object").astype(str).agg(" ".join, axis=1)
         text_col = "text"
 
-# Detect label column
+# To keep the script forgiving enough for slightly different CSV schemas, 
+# but still fail loudly if nothing usable exists.
 label_col = None
 for c in ["label", "class", "is_spam", "spam", "target"]:
     if c in df.columns:
@@ -53,7 +55,7 @@ for c in ["label", "class", "is_spam", "spam", "target"]:
 if label_col is None:
     raise SystemExit(" No label column found. Please ensure your CSV has a label/class/spam column.")
 
-# Map labels -> 0 legitimate, 1 phishing/spam
+# Normalise label values into the exact 0/1 scheme expected by the training code.
 labels = df[label_col]
 if labels.dtype == object:
    labels = labels.str.lower().str.strip().map({
@@ -62,7 +64,7 @@ if labels.dtype == object:
     })
 labels = pd.to_numeric(labels, errors="coerce")
 
-# Build clean dataframe
+# To keep only the fields the downstream pipeline actually needs.
 df = pd.DataFrame({"text": df[text_col].astype(str), "label": labels}).dropna()
 df = df.drop_duplicates(subset=["text"]).reset_index(drop=True)
 df["label"] = df["label"].astype(int)
@@ -164,7 +166,8 @@ def count_special_chars(text):
     """Count special characters (phishing often has odd formatting)"""
     return len(re.findall(r'[!@#$%^&*()]', text))
 
-# Apply feature extraction
+# Features saved for analysis/reporting even though the live app now
+# relies more on model output plus supporting rule evidence than on a single handcrafted score.
 df['url_count'] = df['text'].apply(count_urls)
 df['urgency_score'] = df['text'].apply(urgency_score)
 df['suspicious_patterns'] = df['text'].apply(suspicious_patterns)
@@ -177,7 +180,7 @@ print(f"  Suspicious patterns - Phishing: {df[df['label']==1]['suspicious_patter
 
 print(f"\n[INFO] Final clean dataset: {len(df)} rows")
 
-# Split dataset
+# Split once with stratification so the saved CSVs and tokenized datasets stay aligned.
 print("\n[INFO] Splitting dataset (70% train, 10% val, 20% test)...")
 train_df, test_df = train_test_split(df, test_size=0.2, stratify=df["label"], random_state=42)
 train_df, val_df = train_test_split(train_df, test_size=0.125, stratify=train_df["label"], random_state=42)
@@ -193,7 +196,8 @@ test_df.to_csv(PROC / "test.csv", index=False)
 df.to_csv(PROC / "phishing_corpus.csv", index=False)
 print(f"\n[SAVED] CSV splits -> {PROC}/")
 
-# Tokenization (DistilBERT)
+# The tokenized datasets are saved to disk so training does not have to redo
+# preprocessing every time the notebook or script is rerun.
 print("\n[INFO] Tokenizing with DistilBERT...")
 tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
 
@@ -211,7 +215,7 @@ df_to_tokenized(train_df, "train")
 df_to_tokenized(val_df, "val")
 df_to_tokenized(test_df, "test")
 
-#Save the statistics
+# Save a small JSON summary because the app and report both reuse these values later.
 print("\n[INFO] Saving dataset statistics...")
 stats = {
     "dataset_info": {

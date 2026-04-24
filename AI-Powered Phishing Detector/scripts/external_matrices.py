@@ -15,6 +15,8 @@ OUT_DISTILBERT = RESULTS_DIR / "trec06_distilbert_confusion_matrix.png"
 
 
 def generate_cm(json_path: Path, out_path: Path, title: str):
+    # The evaluation scripts already save raw numbers. This helper just turns
+    # them into clean figures for the report and the app.
     data = json.loads(json_path.read_text(encoding="utf-8"))
     cm = np.array(data["confusion_matrix"])
 

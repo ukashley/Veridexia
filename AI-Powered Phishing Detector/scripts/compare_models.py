@@ -3,6 +3,8 @@ import joblib
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
+# This script is just a quick side-by-side sanity check, useful when you want a rough feel for how both saved models respond to the same message.
+
 # Baseline
 BASELINE_MODEL_PATH = "models/baseline/model.pkl"
 VECTORIZER_PATH = "models/baseline/vectorizer.pkl"
@@ -24,7 +26,7 @@ print("\n" + "=" * 50)
 print("PHISHING DETECTION RESULTS")
 print("=" * 50)
 
-# Baseline Inference
+# Baseline inference is nearly instant, so it gives a nice contrast with the heavier transformer path.
 start = time.time()
 X = vectorizer.transform([email])
 baseline_probs = baseline_model.predict_proba(X)[0]
@@ -35,7 +37,7 @@ print(f"  Prediction: {'PHISHING' if baseline_probs[1] > 0.5 else 'LEGITIMATE'}"
 print(f"  Confidence: {baseline_probs[1]*100:.2f}%")
 print(f"  Inference time: {baseline_time:.1f} ms")
 
-# Distilbert Inference
+# DistilBERT is slower but can pick up on context that the TF-IDF baseline misses.
 start = time.time()
 inputs = tokenizer(
     email,

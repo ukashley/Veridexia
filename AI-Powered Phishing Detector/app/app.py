@@ -39,6 +39,7 @@ DISTILBERT_REQUIRED_FILES = (
     'model.safetensors',
 )
 
+# Saved artefacts
 BASELINE_METRICS = RESULTS_DIR / 'trec06_baseline_metrics.json'
 DISTILBERT_METRICS = RESULTS_DIR / 'trec06_distilbert_metrics.json'
 BASELINE_INTERNAL_METRICS = BASELINE_DIR / 'metrics.json'
@@ -55,8 +56,13 @@ SENSITIVITY_THRESHOLDS = {
     'Balanced': 0.65,
     'High': 0.55,
 }
+
+# Remove hidden Unicode control characters from copied email text.
 INVISIBLE_TRANSLATION = str.maketrans('', '', '\u200b\u200c\u200d\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\ufeff')
+
+
 def load_json(path: Path):
+    # Fail soft if a saved file is missing.
     if not path.exists():
         return None
     try:
@@ -257,6 +263,8 @@ def compute_user_verdict(result, rules: dict, support_result=None):
         and not bool(rules.get("has_urgency"))
         and int(rules.get("url_count", 0)) == 0
     )
+
+    # High-risk cues
     dangerous_risk_keys = {
         'credential_request',
         'threat_language',
@@ -299,6 +307,8 @@ def compute_user_verdict(result, rules: dict, support_result=None):
     clean_message = no_strong_cues and risk_score <= 0 and 'domain_mismatch' not in risk_keys and 'suspicious_link' not in risk_keys
     low_severity_risk_keys = {'payment_language', 'generic_greeting'}
     low_severity_only = bool(risk_keys) and risk_keys.issubset(low_severity_risk_keys)
+
+    # Routine categories
     routine_message_keys = {
         'transactional_notification',
         'account_administration_notice',
@@ -334,6 +344,7 @@ def compute_user_verdict(result, rules: dict, support_result=None):
     display_prob = prob
     decision_basis = 'model'
 
+    # Manual overrides
     if strong_phishing_combo:
         main_label = "Phishing"
         level = "high" if max_model_prob >= 0.75 or risk_score >= 3.4 else "medium"
@@ -460,6 +471,7 @@ def build_model_input(body: str, subject: str = '', sender_email: str = '', send
     subj = normalize_message_text(subject)
     body_text = normalize_message_text(body)
 
+    # Unified model input
     if sender_display and sender_display != sender:
         parts.append(f'Sender: {sender_display}')
     if sender:
@@ -546,11 +558,13 @@ def inject_custom_css():
 
 @st.cache_resource
 def get_baseline_predictor():
+    # Load once per session
     return BaselinePredictor()
 
 
 @st.cache_resource
 def get_distilbert_predictor():
+    # Load once per session
     if not distilbert_assets_available():
         raise RuntimeError('DistilBERT weights are not available in this deployment.')
     from src.inference.distilbert import DistilBertPredictor
@@ -561,10 +575,12 @@ st.set_page_config(page_title='Veridexia', layout='wide')
 inject_custom_css()
 st.title('Veridexia: ML-Based Phishing Detection')
 
+# Available runtime features
 model_choices = available_model_choices()
 distilbert_enabled = 'distilbert' in model_choices
 gmail_enabled = GOOGLE_CREDENTIALS.exists()
 
+# Session state defaults
 if 'model_choice' not in st.session_state:
     st.session_state.model_choice = 'distilbert' if distilbert_enabled else 'baseline'
 if 'threshold' not in st.session_state:
@@ -602,6 +618,7 @@ if st.session_state.model_choice not in model_choices:
     st.session_state.model_choice = model_choices[0]
 
 with st.sidebar:
+    # Global controls
     st.header('Quick Controls')
     st.session_state.model_choice = st.selectbox(
         'Model',
@@ -635,11 +652,13 @@ with st.sidebar:
     st.session_state.threshold = threshold_for_sensitivity(st.session_state.detection_sensitivity)
 
 
+# Main app tabs
 tab_scan, tab_overview, tab_analysis, tab_settings = st.tabs(
     ['Scan Email', 'Overview', 'Model Analysis', 'Guide']
 )
 
 with tab_overview:
+    # Overview tab
     col1, col2 = st.columns([1.2, 1])
 
     baseline_metrics = load_json(BASELINE_METRICS)
@@ -729,12 +748,14 @@ with tab_overview:
             st.info('No emails have been scanned yet. Use the Scan Email tab to analyze a message.')
 
 with tab_scan:
+    # Main scan workflow
     st.subheader('Scan Email')
     st.caption('Paste the body of an email or upload exported email files or previously saved readable documents. The classifier uses any extracted text together with the sender email and subject when available.')
 
     left, right = st.columns([1.15, 1])
 
     with left:
+        # Input panel
         st.markdown('#### Gmail import')
         if gmail_enabled:
             st.caption('Import recent emails from your Gmail inbox to fill the form automatically. The first time you use this, Google will ask you to sign in.')
@@ -854,6 +875,7 @@ with tab_scan:
         run = st.button('Analyze', type='primary', use_container_width=True)
 
     with right:
+        # Output panel
         st.subheader('Results')
 
         if run:
@@ -889,12 +911,14 @@ with tab_scan:
             start = time.time()
 
             if model_choice == 'baseline':
+                # Baseline path
                 predictor = get_baseline_predictor()
                 result = predictor.predict(model_input, threshold=threshold)
                 evidence = baseline_evidence(model_input, predictor)
                 support_result = None
                 support_evidence = None
             else:
+                # DistilBERT + baseline support
                 predictor = get_distilbert_predictor()
                 result = predictor.predict(model_input, threshold=threshold)
                 evidence = None
@@ -902,6 +926,7 @@ with tab_scan:
                 support_result = support_predictor.predict(model_input, threshold=threshold)
                 support_evidence = baseline_evidence(model_input, support_predictor)
 
+            # Rule layer
             rules = rule_based_evidence(combined_body, sender_email=effective_sender, subject=effective_subject)
             verdict = compute_user_verdict(result, rules, support_result=support_result)
             p_phish = float(verdict.get('display_prob', result.prob_phishing))
@@ -987,6 +1012,7 @@ with tab_scan:
             st.info('Example output: Likely phishing / Suspicious - review recommended / Likely legitimate')
 
 with tab_analysis:
+    # Saved evaluation artefacts
     baseline_internal_metrics = load_json(BASELINE_INTERNAL_METRICS)
     distilbert_internal_metrics = load_json(DISTILBERT_INTERNAL_METRICS)
     baseline_metrics = load_json(BASELINE_METRICS)
@@ -1092,6 +1118,7 @@ with tab_analysis:
             st.caption('DistilBERT confusion matrix image not found.')
 
 with tab_settings:
+    # Quick guide
     st.subheader('Guide')
     st.write('This page summarises the current app profile and gives a few practical tips for cleaner scans.')
 

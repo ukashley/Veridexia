@@ -135,7 +135,7 @@ def _find_matches(patterns, text: str):
         for match in re.finditer(pattern, text, flags=re.I | re.S):
             value = re.sub(r'\s+', ' ', match.group(0).strip())
             hits.append(value)
-    # preserve order, remove duplicates
+    # Keep the first natural-looking examples so the UI can show snippets that still read like the source email.
     return list(dict.fromkeys(hits))
 
 
@@ -165,6 +165,8 @@ def _url_signal(urls):
     risk = 0.0
     reasons = []
 
+    # Most legitimate emails include links, so we only escalate when the visible URL
+    # also carries patterns that tend to look suspicious on their own.
     for raw in urls[:5]:
         candidate = raw if raw.startswith(('http://', 'https://')) else f'http://{raw}'
         parsed = urlparse(candidate)
@@ -249,6 +251,8 @@ def rule_based_evidence(text: str, sender_email: str = "", subject: str = ""):
     combined_l = f'{subject_l} {text_l}'.strip()
     combined_compact = _compact_text(combined_l)
 
+    # This layer is intentionally not "phishing cues only".
+    # It also looks for reassuring patterns so the app can explain borderline but routine emails more fairly.
     urls = extract_urls(raw_text)
     emails = extract_email_addresses(raw_text)
 

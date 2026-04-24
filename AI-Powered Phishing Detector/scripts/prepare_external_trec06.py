@@ -2,7 +2,7 @@ from pathlib import Path
 import pandas as pd
 import csv, sys
 
-# To allow for very large email bodies
+# TREC-06 can contain long message bodies, so raise the CSV field limit first.
 csv.field_size_limit(sys.maxsize)
 
 IN_PATH  = Path("data/TREC-06.csv")          
@@ -16,7 +16,7 @@ df["label"] = df["label"].astype(int)
 
 df["text"] = (df["subject"].fillna("") + " " + df["body"].fillna("")).astype(str)
 
-# Keep only what your pipeline expects
+# Strip the export back to the two fields the evaluators actually need.
 out = df[["text", "label"]].copy()
 
 # Basic clean up to prevent whitespace 

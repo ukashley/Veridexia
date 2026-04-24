@@ -55,7 +55,8 @@ print(f"  - Test:  {len(test_dataset):,} samples")
 # ===== CALCULATE CLASS WEIGHTS =====
 print("\n[3] Calculating class weights for imbalanced data...")
 
-# Count labels in training set
+# Weight the loss from the training labels only; that keeps the balancing logic
+# tied to what the optimiser actually sees.
 train_labels = train_dataset["label"]
 label_counts = np.bincount(train_labels)
 total_samples = len(train_labels)
@@ -74,7 +75,8 @@ print("\n[4] Loading DistilBERT model...")
 model_name = "distilbert-base-uncased"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-# Custom model class with weighted loss
+# Hugging Face's default trainer loss is unweighted, so we wrap the classifier
+# and replace the loss to reflect the slight class imbalance.
 class WeightedDistilBERT(torch.nn.Module):
     def __init__(self, model_name, class_weights):
         super().__init__()
@@ -88,7 +90,8 @@ class WeightedDistilBERT(torch.nn.Module):
     def forward(self, input_ids, attention_mask, labels=None):
         outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
         
-        # Apply weighted loss if labels provided
+        # Keep prediction-time behaviour unchanged and only swap in the weighted
+        # loss during supervised training.
         if labels is not None:
             loss_fct = torch.nn.CrossEntropyLoss(weight=self.class_weights.to(outputs.logits.device))
             loss = loss_fct(outputs.logits, labels)
@@ -254,7 +257,8 @@ print(f"[OK] Confusion matrix saved to {MODEL_DIR / 'confusion_matrix.png'}")
 # ===== SAVE MODEL =====
 print("\n[11] Saving model and metrics...")
 
-# Save the base model (not the wrapper)
+# Save the underlying DistilBERT classifier rather than the wrapper so the app
+# can reload it with the standard transformers API.
 trainer.model.model.save_pretrained(MODEL_DIR / "final_model")
 tokenizer.save_pretrained(MODEL_DIR / "final_model") 
 

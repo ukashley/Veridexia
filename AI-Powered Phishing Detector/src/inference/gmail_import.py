@@ -92,6 +92,8 @@ def _extract_text_from_payload(payload: dict | None) -> str:
 
         queue.extend(parts)
 
+    # Prefer plain text when Gmail gives both plain and HTML versions.
+    # It is usually cleaner and closer to what the models were trained on.
     if plain_parts:
         return _clean_text('\n\n'.join(part for part in plain_parts if part.strip()))
     if html_parts:

@@ -6,7 +6,9 @@ def baseline_evidence(text: str, predictor, top_k: int = 8):
     X = vec.transform([text])
     feature_names = np.array(vec.get_feature_names_out())
 
-    # Logistic regression weights for phishing class
+    # For logistic regression, positive weights push toward phishing and
+    # negative weights push toward legitimate. We only surface terms that
+    # actually appear in the current email so the explanation stays grounded.
     weights = clf.coef_[0]
     present_idx = X.nonzero()[1]
 

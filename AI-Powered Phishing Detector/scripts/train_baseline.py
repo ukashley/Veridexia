@@ -1,6 +1,6 @@
 """
-Trains a classical ML baseline (TF-IDF + Logistic Regression) for comparison
-with the DistilBERT model. This demonstrates understanding of model evaluation
+Trains a classical ML baseline (TF-IDF + Logistic Regression) for comparisonwith the DistilBERT model. 
+This demonstrates understanding of model evaluation
 and provides a performance benchmark.
 """
 
@@ -43,7 +43,8 @@ print(f"  - Train: {len(train_df):,} samples")
 print(f"  - Val:   {len(val_df):,} samples")
 print(f"  - Test:  {len(test_df):,} samples")
 
-# Combining train and val for final training 
+# The baseline does not need a separate validation loop here, so the
+# validation split is folded back into training 
 train_full_df = pd.concat([train_df, val_df], ignore_index=True)
 print(f"  - Combined train+val: {len(train_full_df):,} samples")
 
@@ -58,7 +59,7 @@ print("  (This extracts word frequency features from text)")
 
 start_time = time.time()
 
-# Initializing TF-IDF with reasonable parameters
+# These settings are deliberately conservative so its fast enough to retrain without drama.
 tfidf = TfidfVectorizer(
     max_features=10000,      # Top 10k most important words
     ngram_range=(1, 2),      # Unigrams and bigrams
@@ -94,7 +95,8 @@ print("  (Using class weights to handle imbalance)")
 
 start_time = time.time()
 
-# TrainING with class weights to handle imbalance
+# Balanced class weights stop the model from drifting too far toward whichever
+# class happens to be slightly more common in the training split.
 clf = LogisticRegression(
     max_iter=1000,
     class_weight='balanced',  
@@ -186,7 +188,8 @@ print(f"[OK] ROC curve saved to {MODEL_DIR / 'roc_curve.png'}")
 # FEATURE IMPORTANCE 
 print("\n[7] Analyzing feature importance...")
 
-# Get the top features for each class
+# Looking at the most positive and most negative coefficients makes it much easier
+# to explain what the baseline has actually learned.
 coefficients = clf.coef_[0]
 top_phishing_idx = np.argsort(coefficients)[-20:][::-1]
 top_legit_idx = np.argsort(coefficients)[:20]
@@ -230,7 +233,7 @@ print(f"[OK] Feature importance saved to {MODEL_DIR / 'feature_importance.png'}"
 # SAVE MODEL AND METRICS 
 print("\n[8] Saving model and metrics...")
 
-# Save model
+# Save the fitted artefacts separately so the app can load them quickly at runtime.
 with open(MODEL_DIR / "model.pkl", "wb") as f:
     pickle.dump(clf, f)
 

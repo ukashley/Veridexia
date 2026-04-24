@@ -2,6 +2,7 @@ from __future__ import annotations
 
 
 def _join_labels(items):
+    # Small helper so the explanation reads like a sentence instead of a raw list.
     items = [item for item in items if item]
     if not items:
         return ''
@@ -33,6 +34,8 @@ def generate_explanation(result, evidence=None, rule_evidence=None, display_labe
     has_credential_request = bool(rules.get('has_credential_request'))
     risk_score = float(rules.get('risk_score', 0.0))
 
+    # The app needs short, plain-language explanations rather than a dump of
+    # internal features, so this function keeps the wording direct and user-facing.
     parts = []
 
     if is_phishing:

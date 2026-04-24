@@ -9,7 +9,8 @@ MODEL_PATH = Path("models/baseline/model.pkl")
 
 df = pd.read_csv(DATA_PATH)
 
-# Auto-detect text column
+# The external set has gone through a couple of slightly different preparation paths, 
+# so the evaluator tolerates the main text-column variants I used.
 TEXT_COLS = ["text_combined", "text", "email", "body"]
 text_col = next(c for c in TEXT_COLS if c in df.columns)
 

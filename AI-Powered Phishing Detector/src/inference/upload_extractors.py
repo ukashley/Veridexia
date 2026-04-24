@@ -196,6 +196,8 @@ def _extract_eml_text(data: bytes, depth: int) -> ExtractedUpload:
                     sections.append(html_text)
             continue
 
+        # Follow text-like attachments inside uploaded emails, but stop after a couple of levels
+        # so a messy .eml file cannot blow up scan time.
         if not filename or depth >= 2:
             continue
 
@@ -310,6 +312,8 @@ def build_upload_context(uploaded_files) -> UploadContext:
         if item.text:
             body_parts.append(f'[File: {item.filename}]\n{item.text}')
 
+    # Uploaded text is merged into one scan body so pasted content and file content
+    # can be analysed together as a single message context.
     body_text = '\n\n'.join(part for part in body_parts if part).strip()
     clipped_body, was_clipped = _clip_text(body_text, limit=MAX_COMBINED_TEXT)
     if was_clipped:

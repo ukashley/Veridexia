@@ -8,12 +8,13 @@ from sklearn.metrics import classification_report, confusion_matrix, accuracy_sc
 MODEL_DIR = Path("models/distilbert/final_model")
 DATA_PATH = Path("data/processed/trec06_processed.csv")
 
-# Load data
+# This script is lightweight so it can load the prepared external dataset, find the
+# usable text column, then run batched inference over the saved model.
 df = pd.read_csv(DATA_PATH)
 
 print("Columns:", list(df.columns))  
 
-# Pick the right text column
+# To pick the right text column
 TEXT_COL_CANDIDATES = ["text_combined", "text", "email", "body"]
 text_col = next((c for c in TEXT_COL_CANDIDATES if c in df.columns), None)
 if text_col is None:
@@ -22,7 +23,7 @@ if text_col is None:
 texts = df[text_col].astype(str).tolist()
 y_true = df["label"].astype(int).to_numpy()
 
-# Load model + tokenizer
+# Load model and tokenizer
 tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
 model = AutoModelForSequenceClassification.from_pretrained(MODEL_DIR)
 model.eval()
@@ -30,7 +31,7 @@ model.eval()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
 
-# Predict in batches
+# To batch the forward passes so external evaluation stays manageable on CPU as well.
 batch_size = 16
 preds = []
 
