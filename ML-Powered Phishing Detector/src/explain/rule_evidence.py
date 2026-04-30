@@ -4,8 +4,9 @@ import re
 from urllib.parse import urlparse
 
 INVISIBLE_TRANSLATION = str.maketrans('', '', '\u200b\u200c\u200d\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\ufeff')
-URL_RE = re.compile(r'https?://\S+|www\.\S+', re.I)
+URL_RE = re.compile(r'hxxps?://\S+|https?://\S+|www\.\S+', re.I)
 EMAIL_RE = re.compile(r'\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b', re.I)
+PHONE_RE = re.compile(r'(?:\+?\d[\d\s().-]{7,}\d)')
 
 CREDENTIAL_REQUEST_PATTERNS = [
     r'\b(enter|confirm|verify|provide|submit|update|share|send)\b.{0,35}\b(password|passcode|otp|one[- ]time code|verification code|login details?|credentials?)\b',
@@ -18,6 +19,17 @@ SECURITY_NOTIFICATION_PATTERNS = [
     r'\bif you did not (make|request|initiate|authorise|authorize) this (change|reset|request)\b',
     r'\bcontact (support|customer service|the helpdesk|the service desk)\b',
     r'\bwe will never ask for your password\b',
+    r'\bwe will never ask you to reply by email with your (password|card number|bank details?)\b',
+    r'\bwe will never ask (?:you )?for (?:your )?(password|card number|bank details?)\b',
+]
+
+IDENTITY_VERIFICATION_PATTERNS = [
+    r'\bverify your identity\b',
+    r'\bidentity verification\b',
+    r'\bupload your id\b',
+    r'\bcomplete (?:an )?image verification\b',
+    r'\bselfie or video confirmation\b',
+    r'\bfinish your account set-?up\b',
 ]
 
 URGENCY_PATTERNS = [
@@ -50,6 +62,19 @@ TRANSACTIONAL_NOTIFICATION_PATTERNS = [
     r'\brecurring reference number\b',
     r'\bmonthly plan\b',
     r'\brenewal\b',
+    r'\bpayment due\b',
+    r'\bpayment deadline\b',
+    r'\belectricity account\b',
+    r'\bbilling team\b',
+    r'\bcustomer portal\b',
+]
+
+FORMAL_SERVICE_PATTERNS = [
+    r'\bdear [a-z][a-z .-]{1,40},',
+    r'\bwe are writing to\b',
+    r'\bkind regards\b',
+    r'\bcustomer support\b',
+    r'\bwebsite:\s*(?:hxxps?://|https?://|www\.)',
 ]
 
 NEWSLETTER_PATTERNS = [
@@ -107,6 +132,36 @@ def _domain(addr: str) -> str:
     return addr.split('@', 1)[1] if '@' in addr else ''
 
 
+def _base_domain(host: str) -> str:
+    host = (host or '').strip().lower()
+    host = host.split(':', 1)[0].strip('.')
+    if host.startswith('www.'):
+        host = host[4:]
+    labels = [part for part in host.split('.') if part]
+    if len(labels) <= 2:
+        return host
+    if len(labels) >= 3 and '.'.join(labels[-2:]) in {'co.uk', 'ac.uk', 'gov.uk', 'org.uk'}:
+        return '.'.join(labels[-3:])
+    return '.'.join(labels[-2:])
+
+
+def _url_host(raw: str) -> str:
+    value = (raw or '').strip().rstrip(').,;]')
+    value = re.sub(r'^hxxp', 'http', value, flags=re.I)
+    candidate = value if re.match(r'https?://', value, flags=re.I) else f'http://{value}'
+    parsed = urlparse(candidate)
+    return (parsed.netloc or parsed.path).lower().split('/', 1)[0]
+
+
+def _url_domains(urls):
+    domains = []
+    for raw in urls or []:
+        host = _url_host(raw)
+        if host:
+            domains.append(_base_domain(host))
+    return sorted({domain for domain in domains if domain})
+
+
 def _brand_tokens(addr: str):
     domain = _domain(addr)
     tokens = []
@@ -147,6 +202,10 @@ def _recipient_domains(text: str):
     return {domain for domain in hits if domain}
 
 
+def _has_phone_number(text: str) -> bool:
+    return bool(PHONE_RE.search(text or ''))
+
+
 def _signal(key: str, title: str, description: str, score: float, matches=None, kind: str = 'risk'):
     return {
         'key': key,
@@ -168,11 +227,9 @@ def _url_signal(urls):
     # Most legitimate emails include links, so we only escalate when the visible URL
     # also carries patterns that tend to look suspicious on their own.
     for raw in urls[:5]:
-        candidate = raw if raw.startswith(('http://', 'https://')) else f'http://{raw}'
-        parsed = urlparse(candidate)
-        host = (parsed.netloc or parsed.path).lower()
+        host = _url_host(raw)
 
-        if raw.lower().startswith('http://'):
+        if raw.lower().startswith('http://') or raw.lower().startswith('hxxp://'):
             risk += 0.8
             reasons.append('uses insecure HTTP')
 
@@ -218,10 +275,6 @@ def _sender_domain_signal(sender_domain: str):
     reasons = []
     host = sender_domain.lower()
 
-    if host.endswith(('.example', '.invalid', '.test', '.localhost')):
-        risk += 0.9
-        reasons.append('uses a non-public or placeholder domain')
-
     if any(token in host for token in ['login', 'verify', 'secure', 'reset', 'update', 'account']):
         risk += 0.7
         reasons.append('contains phishing-style sender terms')
@@ -260,6 +313,8 @@ def rule_based_evidence(text: str, sender_email: str = "", subject: str = ""):
     reassurance_signals = []
     context_signals = []
     sender_domain = _domain(sender_email)
+    sender_base_domain = _base_domain(sender_domain)
+    url_domains = _url_domains(urls)
     recipient_domains = _recipient_domains(raw_text)
     body_domains = sorted({_domain(e) for e in emails if _domain(e) and _domain(e) not in recipient_domains})
 
@@ -282,6 +337,17 @@ def rule_based_evidence(text: str, sender_email: str = "", subject: str = ""):
             'The wording looks more like a password-change notice or security alert than a direct request to hand over credentials.',
             -1.8,
             security_hits,
+            'reassurance',
+        ))
+
+    identity_hits = _find_matches(IDENTITY_VERIFICATION_PATTERNS, combined_l)
+    if identity_hits:
+        reassurance_signals.append(_signal(
+            'identity_verification_context',
+            'Identity verification context',
+            'The wording looks like a routine identity or KYC verification flow rather than a password or code request.',
+            -1.4,
+            identity_hits,
             'reassurance',
         ))
 
@@ -326,6 +392,27 @@ def rule_based_evidence(text: str, sender_email: str = "", subject: str = ""):
             'The message reads like a routine billing, renewal, or order-confirmation notice rather than a request for credentials or urgent action.',
             -0.9,
             transactional_hits,
+            'reassurance',
+        ))
+
+    formal_hits = _find_matches(FORMAL_SERVICE_PATTERNS, raw_text.lower())
+    if formal_hits:
+        reassurance_signals.append(_signal(
+            'formal_service_message',
+            'Formal service wording',
+            'The message uses formal service-style wording and includes normal customer-support context.',
+            -0.6,
+            formal_hits,
+            'reassurance',
+        ))
+
+    if _has_phone_number(raw_text) and re.search(r'\b(customer support|support|contact)\b', combined_l):
+        reassurance_signals.append(_signal(
+            'support_contact_present',
+            'Support contact present',
+            'The message includes customer-support contact details, which is useful context for manual verification.',
+            -0.4,
+            PHONE_RE.findall(raw_text)[:2],
             'reassurance',
         ))
 
@@ -422,7 +509,41 @@ def rule_based_evidence(text: str, sender_email: str = "", subject: str = ""):
             'reassurance',
         ))
 
-    if sender_domain and body_domains and all(d != sender_domain for d in body_domains):
+    if sender_base_domain and url_domains and sender_base_domain in url_domains:
+        reassurance_signals.append(_signal(
+            'link_domain_match',
+            'Link domain matches sender',
+            'The visible link domain appears to match the sender organisation domain.',
+            -1.2,
+            [f"sender={sender_base_domain}", f"link={sender_base_domain}"],
+            'reassurance',
+        ))
+
+    if sender_base_domain and any(
+        re.search(rf'\b(?:hxxps?://|https?://|www\.)[^\s]+{re.escape(sender_base_domain)}', raw_text, flags=re.I)
+        and re.search(r'\b(website|official website|customer portal)\b', combined_l)
+        for _ in [0]
+    ):
+        reassurance_signals.append(_signal(
+            'official_website_present',
+            'Official website or portal present',
+            'The message includes an official website or customer portal that matches the sender organisation.',
+            -0.7,
+            [sender_base_domain],
+            'reassurance',
+        ))
+
+    if security_hits and not credential_hits:
+        reassurance_signals.append(_signal(
+            'no_email_credential_request',
+            'No email credential request',
+            'The message explicitly says not to reply by email with passwords, card numbers, or bank details.',
+            -1.0,
+            security_hits,
+            'reassurance',
+        ))
+
+    if sender_domain and body_domains and all(_base_domain(d) != sender_base_domain for d in body_domains):
         risk_signals.append(_signal(
             'domain_mismatch',
             'Domain mismatch',

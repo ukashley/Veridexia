@@ -12,17 +12,11 @@ import zipfile
 from xml.etree import ElementTree as ET
 
 from bs4 import BeautifulSoup
-from PIL import Image
 
 try:
     from pypdf import PdfReader
 except Exception:
     PdfReader = None
-
-try:
-    import pytesseract
-except Exception:
-    pytesseract = None
 
 
 MAX_TEXT_PER_FILE = 12000
@@ -31,7 +25,6 @@ TEXT_EXTENSIONS = {
     '.txt', '.text', '.md', '.rst', '.log', '.csv', '.tsv', '.json',
     '.yaml', '.yml', '.ini', '.cfg', '.html', '.htm', '.xml',
 }
-IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp', '.tif', '.tiff'}
 
 
 @dataclass
@@ -119,23 +112,6 @@ def _extract_pdf_text(data: bytes) -> tuple[str, list[str]]:
         return '\n\n'.join(pages), warnings
     except Exception:
         warnings.append('PDF text extraction failed for this file.')
-        return '', warnings
-
-
-def _extract_image_text(data: bytes) -> tuple[str, list[str]]:
-    warnings = []
-    if pytesseract is None:
-        warnings.append('Image OCR is unavailable. Install pytesseract and Tesseract OCR to scan screenshots or image attachments.')
-        return '', warnings
-
-    try:
-        image = Image.open(BytesIO(data)).convert('RGB')
-        text = pytesseract.image_to_string(image)
-        if not text.strip():
-            warnings.append('OCR ran on the image, but no readable text was found.')
-        return text, warnings
-    except Exception:
-        warnings.append('Image OCR failed for this file.')
         return '', warnings
 
 
@@ -256,10 +232,6 @@ def extract_uploaded_file(filename: str, data: bytes, content_type: str = '', de
         kind = 'pdf'
         extracted_text, pdf_warnings = _extract_pdf_text(data)
         warnings.extend(pdf_warnings)
-    elif suffix in IMAGE_EXTENSIONS or content_type.startswith('image/'):
-        kind = 'image'
-        extracted_text, image_warnings = _extract_image_text(data)
-        warnings.extend(image_warnings)
     elif suffix == '.eml' or content_type == 'message/rfc822':
         nested = _extract_eml_text(data, depth)
         nested.filename = filename or nested.filename

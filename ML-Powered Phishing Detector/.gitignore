@@ -1,6 +1,8 @@
 .streamlit/secrets.toml
 credentials.json
 token.json
+client_secret_*.json
+.env
 
 # Local Python environment and caches
 .venv/

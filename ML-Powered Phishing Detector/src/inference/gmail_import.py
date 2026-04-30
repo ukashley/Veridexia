@@ -22,6 +22,7 @@ class GmailMessage:
     body_text: str = ''
     snippet: str = ''
     received_at: str = ''
+    body_loaded: bool = False
 
 
 @dataclass
@@ -120,19 +121,27 @@ def _header_map(payload: dict | None) -> dict[str, str]:
     return headers
 
 
-def _build_message(message_id: str, payload: dict, snippet: str = '') -> GmailMessage:
+def _build_message(
+    message_id: str,
+    payload: dict,
+    snippet: str = '',
+    *,
+    include_body: bool = True,
+) -> GmailMessage:
     headers = _header_map(payload)
     sender_label = headers.get('from', '')
     sender_email = parseaddr(sender_label)[1]
+    clean_snippet = _clean_text(snippet, limit=300)
 
     return GmailMessage(
         message_id=message_id,
         subject=headers.get('subject', '(no subject)') or '(no subject)',
         sender_email=sender_email,
         sender_label=sender_label or sender_email,
-        body_text=_extract_text_from_payload(payload) or _clean_text(snippet),
-        snippet=_clean_text(snippet, limit=300),
+        body_text=_extract_text_from_payload(payload) if include_body else '',
+        snippet=clean_snippet,
         received_at=_format_received_at(headers.get('date')),
+        body_loaded=include_body,
     )
 
 
@@ -151,30 +160,22 @@ def _load_gmail_dependencies():
     return Request, Credentials, InstalledAppFlow, build
 
 
-def import_recent_gmail_messages(
-    credentials_path: Path,
-    token_path: Path,
-    *,
-    max_results: int = 10,
-) -> GmailImportResult:
-    result = GmailImportResult()
-
+def _get_gmail_service(credentials_path: Path, token_path: Path):
+    warnings: list[str] = []
     try:
         Request, Credentials, InstalledAppFlow, build = _load_gmail_dependencies()
     except RuntimeError as exc:
-        result.warnings.append(str(exc))
-        return result
+        return None, [str(exc)]
 
     if not credentials_path.exists():
-        result.warnings.append(f'Google OAuth credentials were not found at {credentials_path.name}.')
-        return result
+        return None, [f'Google OAuth credentials were not found at {credentials_path.name}.']
 
     creds = None
     if token_path.exists():
         try:
             creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
         except Exception:
-            result.warnings.append('Existing token.json could not be read and will be replaced after sign-in.')
+            warnings.append('Existing token.json could not be read and will be replaced after sign-in.')
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
@@ -191,6 +192,61 @@ def import_recent_gmail_messages(
 
     try:
         service = build('gmail', 'v1', credentials=creds, cache_discovery=False)
+    except Exception as exc:
+        warnings.append(f'Gmail import failed: {exc}')
+        return None, warnings
+
+    return service, warnings
+
+
+def _fetch_message_previews(service, message_ids: list[str]):
+    previews: dict[int, GmailMessage] = {}
+    warnings: list[str] = []
+
+    def callback(request_id, response, exception):
+        index = int(request_id)
+        if exception is not None:
+            warnings.append(f'Could not import one Gmail message preview: {exception}')
+            return
+        previews[index] = _build_message(
+            message_ids[index],
+            response.get('payload') or {},
+            snippet=response.get('snippet', ''),
+            include_body=False,
+        )
+
+    batch = service.new_batch_http_request(callback=callback)
+    for index, message_id in enumerate(message_ids):
+        batch.add(
+            service.users().messages().get(
+                userId='me',
+                id=message_id,
+                format='metadata',
+                metadataHeaders=['Subject', 'From', 'Date'],
+            ),
+            request_id=str(index),
+        )
+
+    batch.execute()
+
+    ordered = [previews[index] for index in range(len(message_ids)) if index in previews]
+    return ordered, warnings
+
+
+def import_recent_gmail_messages(
+    credentials_path: Path,
+    token_path: Path,
+    *,
+    max_results: int = 10,
+) -> GmailImportResult:
+    result = GmailImportResult()
+
+    service, warnings = _get_gmail_service(credentials_path, token_path)
+    result.warnings.extend(warnings)
+    if service is None:
+        return result
+
+    try:
         response = service.users().messages().list(
             userId='me',
             labelIds=['INBOX'],
@@ -205,21 +261,37 @@ def import_recent_gmail_messages(
         result.warnings.append('No inbox messages were returned by Gmail.')
         return result
 
-    for item in messages:
-        try:
-            details = service.users().messages().get(
-                userId='me',
-                id=item['id'],
-                format='full',
-            ).execute()
-            result.items.append(
-                _build_message(
-                    item['id'],
-                    details.get('payload') or {},
-                    snippet=details.get('snippet', ''),
-                )
-            )
-        except Exception as exc:
-            result.warnings.append(f"Could not import one Gmail message: {exc}")
+    message_ids = [item['id'] for item in messages if item.get('id')]
+    previews, preview_warnings = _fetch_message_previews(service, message_ids)
+    result.items.extend(previews)
+    result.warnings.extend(preview_warnings)
 
     return result
+
+
+def load_gmail_message_body(
+    credentials_path: Path,
+    token_path: Path,
+    message_id: str,
+):
+    service, warnings = _get_gmail_service(credentials_path, token_path)
+    if service is None:
+        return None, warnings
+
+    try:
+        details = service.users().messages().get(
+            userId='me',
+            id=message_id,
+            format='full',
+        ).execute()
+    except Exception as exc:
+        warnings.append(f'Could not load the selected Gmail message: {exc}')
+        return None, warnings
+
+    message = _build_message(
+        message_id,
+        details.get('payload') or {},
+        snippet=details.get('snippet', ''),
+        include_body=True,
+    )
+    return message, warnings

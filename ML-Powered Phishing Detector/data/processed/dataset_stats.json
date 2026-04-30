@@ -1,0 +1,23 @@
+{
+  "dataset_info": {
+    "total_samples": 81344,
+    "train_samples": 56940,
+    "val_samples": 8135,
+    "test_samples": 16269
+  },
+  "class_distribution": {
+    "legitimate_count": 38661,
+    "phishing_count": 42683,
+    "legitimate_ratio": 0.47527783241542093,
+    "phishing_ratio": 0.5247221675845791,
+    "imbalance_ratio": 1.1040324875197227
+  },
+  "feature_statistics": {
+    "avg_urls_phishing": 0.0,
+    "avg_urls_legitimate": 0.0,
+    "avg_urgency_phishing": 0.18344539980788604,
+    "avg_urgency_legitimate": 0.10142003569488632,
+    "avg_suspicious_phishing": 0.06157018016540543,
+    "avg_suspicious_legitimate": 0.010087685264219756
+  }
+}

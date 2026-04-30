@@ -17,7 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.inference.baseline import BaselinePredictor
-from src.inference.gmail_import import import_recent_gmail_messages
+from src.inference.gmail_import import import_recent_gmail_messages, load_gmail_message_body
 from src.inference.upload_extractors import build_upload_context
 from src.explain.baseline_evidence import baseline_evidence
 from src.explain.nlg import generate_explanation
@@ -52,10 +52,14 @@ DISTILBERT_CM_IMG = RESULTS_DIR / 'trec06_distilbert_confusion_matrix.png'
 BASELINE_ROC_IMG = BASELINE_DIR / 'roc_curve.png'
 BASELINE_FEAT_IMG = BASELINE_DIR / 'feature_importance.png'
 SENSITIVITY_THRESHOLDS = {
-    'Low': 0.77,
+    'Low risk': 0.77,
     'Balanced': 0.65,
-    'High': 0.55,
+    'Strict': 0.55,
 }
+APP_VERSION = '1.0.0'
+RECENT_ACTIVITY_LIMIT = 5
+RECENT_ACTIVITY_TTL = 24 * 60 * 60
+SUPPORT_URL = 'https://github.com/ukashley/Veridexia'
 
 # Remove hidden Unicode control characters from copied email text.
 INVISIBLE_TRANSLATION = str.maketrans('', '', '\u200b\u200c\u200d\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\ufeff')
@@ -223,6 +227,22 @@ def available_model_choices() -> list[str]:
     return choices
 
 
+def prune_recent_activity(entries: list[dict]) -> list[dict]:
+    now = time.time()
+    fresh = []
+    for entry in entries or []:
+        scanned_at = entry.get('scanned_at_ts')
+        if isinstance(scanned_at, (int, float)) and now - float(scanned_at) <= RECENT_ACTIVITY_TTL:
+            fresh.append(entry)
+    return fresh[:RECENT_ACTIVITY_LIMIT]
+
+
+def activity_time_label(scanned_at: float | None) -> str:
+    if not isinstance(scanned_at, (int, float)):
+        return 'Unknown time'
+    return time.strftime('%Y-%m-%d %H:%M', time.localtime(float(scanned_at)))
+
+
 def normalize_message_text(text: str) -> str:
     if not text:
         return ''
@@ -314,13 +334,33 @@ def compute_user_verdict(result, rules: dict, support_result=None):
         'account_administration_notice',
         'newsletter_context',
         'job_alert_context',
+        'identity_verification_context',
+        'formal_service_message',
+    }
+    trusted_service_keys = {
+        'sender_brand_match',
+        'domain_match',
+        'link_domain_match',
+        'official_website_present',
+        'support_contact_present',
+        'no_email_credential_request',
+        'security_notification',
     }
     transactional_reassurance = bool(
-        (routine_message_keys | {'sender_brand_match', 'domain_match'}) & reassurance_keys
+        (routine_message_keys | trusted_service_keys) & reassurance_keys
     )
     strong_benign_reassurance = bool(
         routine_message_keys & reassurance_keys
-    ) and bool({'sender_brand_match', 'domain_match'} & reassurance_keys)
+    ) and bool({'sender_brand_match', 'domain_match', 'link_domain_match'} & reassurance_keys)
+    trusted_service_context = (
+        no_dangerous_cues
+        and 'domain_mismatch' not in risk_keys
+        and 'suspicious_link' not in risk_keys
+        and bool({'sender_brand_match', 'domain_match', 'link_domain_match'} & reassurance_keys)
+        and bool({'transactional_notification', 'formal_service_message', 'support_contact_present', 'official_website_present'} & reassurance_keys)
+        and bool({'no_email_credential_request', 'security_notification'} & reassurance_keys)
+        and risk_score <= 1.2
+    )
     safe_routine_message = (
         bool(routine_message_keys & reassurance_keys)
         and no_dangerous_cues
@@ -336,7 +376,7 @@ def compute_user_verdict(result, rules: dict, support_result=None):
         and risk_score <= 0.5
         and (
             bool(routine_message_keys & reassurance_keys)
-            or bool({'sender_brand_match', 'domain_match', 'security_notification'} & reassurance_keys)
+            or bool({'sender_brand_match', 'domain_match', 'link_domain_match', 'security_notification', 'identity_verification_context'} & reassurance_keys)
             or benign_context
             or not risk_keys
         )
@@ -352,8 +392,37 @@ def compute_user_verdict(result, rules: dict, support_result=None):
         decision_basis = 'high_risk_evidence_override'
     elif (
         prob >= threshold
+        and 'identity_verification_context' in reassurance_keys
+        and ('sender_email_present' in context_keys or bool({'sender_brand_match', 'domain_match'} & reassurance_keys))
+        and no_dangerous_cues
+        and 'domain_mismatch' not in risk_keys
+        and 'suspicious_link' not in risk_keys
+    ):
+        main_label = "Legitimate"
+        level = "review"
+        display_prob = min(
+            support_prob if support_prob is not None else threshold - 0.01,
+            max(0.0, threshold - 0.01),
+        )
+        review_recommended = False
+        decision_basis = 'identity_verification_override'
+    elif (
+        prob >= threshold
+        and trusted_service_context
+        and (support_prob is None or support_prob <= 0.90)
+    ):
+        main_label = "Legitimate"
+        level = "review"
+        display_prob = min(
+            support_prob if support_prob is not None else threshold - 0.01,
+            max(0.0, threshold - 0.01),
+        )
+        review_recommended = True
+        decision_basis = 'trusted_service_context_override'
+    elif (
+        prob >= threshold
         and safe_routine_message
-        and bool({'sender_brand_match', 'domain_match'} & reassurance_keys)
+        and bool({'sender_brand_match', 'domain_match', 'link_domain_match'} & reassurance_keys)
         and (support_prob is None or support_prob <= 0.85)
     ):
         main_label = "Legitimate"
@@ -369,7 +438,7 @@ def compute_user_verdict(result, rules: dict, support_result=None):
         display_prob = min(support_prob, max(0.0, threshold - 0.01))
         decision_basis = 'benign_support_model_override'
     elif prob >= threshold and near_boundary and no_dangerous_cues and risk_score <= 0 and (
-        benign_context or 'domain_match' in reassurance_keys
+        benign_context or bool({'domain_match', 'link_domain_match'} & reassurance_keys)
     ):
         main_label = "Legitimate"
         level = "review"
@@ -394,7 +463,7 @@ def compute_user_verdict(result, rules: dict, support_result=None):
         prob >= threshold
         and support_prob is not None
         and (clean_message or safe_routine_message)
-        and ('sender_email_present' in context_keys or benign_context or 'domain_match' in reassurance_keys)
+        and ('sender_email_present' in context_keys or benign_context or bool({'domain_match', 'link_domain_match'} & reassurance_keys))
         and support_prob <= 0.40
     ):
         ensemble_prob = round((prob + support_prob) / 2.0, 4)
@@ -492,7 +561,8 @@ def render_signal_group(title: str, items, icon: str = ''):
         prefix = f'{icon} ' if icon else ''
         st.markdown(f"{prefix}**{item['title']}** - {item['description']}")
         if item.get('matches'):
-            st.caption('Examples: ' + '; '.join(item['matches']))
+            examples = [truncate_display_value(match) for match in item['matches']]
+            st.caption('Examples: ' + '; '.join(examples))
 
 
 def useful_context_items(items):
@@ -501,6 +571,121 @@ def useful_context_items(items):
         'email_address_present',
     }
     return [item for item in (items or []) if item.get('key') not in hidden_keys]
+
+
+def truncate_display_value(value: str, limit: int = 90) -> str:
+    text = re.sub(r'\s+', ' ', str(value or '')).strip()
+    if len(text) <= limit:
+        return text
+    return f'{text[:limit - 3]}...'
+
+
+def get_risk_level(label: str, probability: float, threshold: float, review_recommended: bool = False) -> str:
+    prob = float(probability)
+    boundary_gap = abs(prob - float(threshold))
+
+    if label == 'Phishing':
+        if prob >= 0.80 or boundary_gap >= 0.18:
+            return 'High'
+        return 'Medium'
+
+    if review_recommended:
+        return 'Medium'
+    if prob <= 0.25:
+        return 'Very low'
+    return 'Low'
+
+
+def result_advice(label: str, risk_level: str, probability: float, threshold: float) -> str:
+    if risk_level == 'Medium' and abs(float(probability) - float(threshold)) < 0.08:
+        return 'Borderline result. Review the message manually before clicking links or sharing details.'
+    if label == 'Phishing':
+        if risk_level == 'High':
+            return 'Do not click links or provide credentials. Verify through the official website.'
+        return 'High risk. Treat this message as suspicious.'
+    return 'Low risk, but review links before clicking.'
+
+
+def verdict_confidence(label: str, probability: float) -> float:
+    prob = float(probability)
+    return 1.0 - prob if label == 'Legitimate' else prob
+
+
+def render_result_summary(verdict: dict, risk_level: str, model_name: str, advice: str, probability: float):
+    label = verdict['label']
+    confidence = verdict_confidence(label, probability)
+    summary = (
+        f"**Verdict:** {label}\n\n"
+        f"**Risk level:** {risk_level}\n\n"
+        f"**Confidence in verdict:** {fmt_pct(confidence)}\n\n"
+        f"**Model used:** {friendly_model_name(model_name)}\n\n"
+        f"**Advice:** {advice}"
+    )
+
+    if label == 'Phishing' or risk_level == 'High':
+        st.error(summary)
+    elif risk_level == 'Medium':
+        st.warning(summary)
+    else:
+        st.success(summary)
+
+    st.progress(
+        min(max(confidence, 0.0), 1.0),
+        text=f'Confidence in verdict: {fmt_pct(confidence)}',
+    )
+
+
+def render_indicator_table(rules: dict):
+    rows = [
+        ('Urgency language', rules.get('has_urgency')),
+        ('Credential request', rules.get('has_credential_request')),
+        ('Threat language', rules.get('has_threat')),
+        ('Security notice context', rules.get('has_security_notification')),
+        ('URLs detected', rules.get('url_count', 0)),
+        ('Email addresses detected', len(rules.get('email_addresses') or [])),
+    ]
+    st.dataframe(
+        pd.DataFrame(rows, columns=['Indicator', 'Value']),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    urls = rules.get('urls') or []
+    if urls:
+        st.markdown('#### Detected URLs')
+        st.dataframe(
+            pd.DataFrame({'URL preview': [truncate_display_value(url, 100) for url in urls]}),
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.code('\n'.join(urls), language='text')
+
+
+def render_explanation_sections(
+    *,
+    summary: str,
+    rules: dict,
+    risk_items: list[dict],
+    reassurance_items: list[dict],
+    context_items: list[dict],
+    expanded: bool = False,
+):
+    with st.expander('Why this result was given', expanded=expanded):
+        safe_summary = escape(summary).replace('\n', '<br>')
+        st.markdown(f"<div class='explanation-card'>{safe_summary}</div>", unsafe_allow_html=True)
+        main_reasons = risk_items or reassurance_items or context_items
+        if main_reasons:
+            st.markdown('**Main reasons**')
+            for item in main_reasons[:5]:
+                st.markdown(f"- **{item['title']}**: {item['description']}")
+        else:
+            st.info('No strong rule-based indicators were found in the visible text. The result is mostly driven by the classifier output.')
+
+    with st.expander('Detected links and indicators'):
+        render_indicator_table(rules)
+        render_signal_group('Warning signs', risk_items, '!')
+        render_signal_group('Context that lowers risk', reassurance_items, '+')
+        render_signal_group('Additional context', context_items, '')
 
 
 def inject_custom_css():
@@ -530,6 +715,22 @@ def inject_custom_css():
             border-radius: 10px;
             margin-bottom: 1rem;
         }
+        .page-heading {
+            font-size: 2.25rem;
+            font-weight: 700;
+            line-height: 1.15;
+            margin: 1.45rem 0 0.75rem 0;
+        }
+        div.stButton > button[kind="primary"] {
+            background-color: #2563eb;
+            border-color: #2563eb;
+            color: white;
+        }
+        div.stButton > button[kind="primary"]:hover {
+            background-color: #1d4ed8;
+            border-color: #1d4ed8;
+            color: white;
+        }
         .small-note {
             color: #6b7280;
             font-size: 0.92rem;
@@ -550,19 +751,26 @@ def inject_custom_css():
             padding: 10px 12px;
             border-bottom: 1px solid #ddd;
         }
+        section[data-testid="stSidebar"] > div:first-child {
+            padding-top: 3.55rem;
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
 
-@st.cache_resource
+def render_page_heading(title: str):
+    st.markdown(f"<h1 class='page-heading'>{escape(title)}</h1>", unsafe_allow_html=True)
+
+
+@st.cache_resource(show_spinner=False)
 def get_baseline_predictor():
     # Load once per session
     return BaselinePredictor()
 
 
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def get_distilbert_predictor():
     # Load once per session
     if not distilbert_assets_available():
@@ -587,8 +795,6 @@ if 'threshold' not in st.session_state:
     st.session_state.threshold = 0.65
 if 'detection_sensitivity' not in st.session_state:
     st.session_state.detection_sensitivity = sensitivity_for_threshold(st.session_state.threshold)
-if 'show_explain' not in st.session_state:
-    st.session_state.show_explain = True
 if 'advanced_mode' not in st.session_state:
     st.session_state.advanced_mode = False
 if 'last_result' not in st.session_state:
@@ -613,37 +819,48 @@ if 'gmail_selected_index' not in st.session_state:
     st.session_state.gmail_selected_index = 0
 if 'gmail_max_results' not in st.session_state:
     st.session_state.gmail_max_results = 5
+if 'recent_activity' not in st.session_state:
+    st.session_state.recent_activity = []
+
+st.session_state.recent_activity = prune_recent_activity(st.session_state.recent_activity)
+if st.session_state.last_result:
+    scanned_at = st.session_state.last_result.get('scanned_at_ts')
+    if isinstance(scanned_at, (int, float)) and time.time() - float(scanned_at) > RECENT_ACTIVITY_TTL:
+        st.session_state.last_result = None
 
 if st.session_state.model_choice not in model_choices:
     st.session_state.model_choice = model_choices[0]
 
 with st.sidebar:
     # Global controls
-    st.header('Quick Controls')
-    st.session_state.model_choice = st.selectbox(
-        'Model',
-        model_choices,
-        index=model_choices.index(st.session_state.model_choice),
-        help="Choose which classifier makes the prediction. DistilBERT is the project's main transformer-based model, while the baseline remains available for comparison.",
-    )
-    if not distilbert_enabled:
-        st.caption('This deployment is using the baseline model for live predictions because the DistilBERT weights are not bundled here.')
-    st.session_state.show_explain = st.toggle(
-        'Show explanation',
-        value=st.session_state.show_explain,
-        help='Show the explanation and supporting evidence under the result.',
-    )
+    st.markdown('# Settings')
     st.session_state.advanced_mode = st.toggle(
         'Advanced mode',
         value=st.session_state.advanced_mode,
-        help='Show advanced controls such as detection sensitivity and technical details.',
+        help='Show advanced controls such as model choice and detection sensitivity.',
     )
+
     if st.session_state.advanced_mode:
+        st.session_state.model_choice = st.selectbox(
+            'Model',
+            model_choices,
+            index=model_choices.index(st.session_state.model_choice),
+            help="Choose which classifier makes the prediction. DistilBERT is the project's main transformer-based model, while the baseline remains available for comparison.",
+        )
+    else:
+        st.session_state.model_choice = 'distilbert' if distilbert_enabled else 'baseline'
+
+    if not distilbert_enabled:
+        st.caption('This deployment is using the baseline model for live predictions because the DistilBERT weights are not bundled here.')
+
+    if st.session_state.advanced_mode:
+        st.markdown('#### Detection sensitivity')
         st.session_state.detection_sensitivity = st.select_slider(
             'Detection sensitivity',
             options=list(SENSITIVITY_THRESHOLDS.keys()),
             value=st.session_state.detection_sensitivity,
-            help='Low sensitivity is stricter and reduces false alarms. High sensitivity catches more suspicious emails but may flag more legitimate messages.',
+            label_visibility='collapsed',
+            help='Low risk is stricter and reduces false alarms. Strict catches more suspicious emails but may flag more legitimate messages.',
         )
         st.caption(
             f"Current phishing threshold: {threshold_for_sensitivity(st.session_state.detection_sensitivity):.2f}"
@@ -651,106 +868,22 @@ with st.sidebar:
 
     st.session_state.threshold = threshold_for_sensitivity(st.session_state.detection_sensitivity)
 
+    st.divider()
+    st.markdown('#### Current setup')
+    st.caption(f"Model: {friendly_model_name(st.session_state.model_choice)}")
+    st.caption(f"Sensitivity: {st.session_state.detection_sensitivity}")
+    st.caption('Detailed evidence appears inside the result expanders after each scan.')
+
 
 # Main app tabs
-tab_scan, tab_overview, tab_analysis, tab_settings = st.tabs(
-    ['Scan Email', 'Overview', 'Model Analysis', 'Guide']
+tab_scan, tab_activity, tab_about, tab_guide = st.tabs(
+    ['Scan Email', 'Recent Activity', 'About', 'Guide']
 )
-
-with tab_overview:
-    # Overview tab
-    col1, col2 = st.columns([1.2, 1])
-
-    baseline_metrics = load_json(BASELINE_METRICS)
-    distilbert_metrics = load_json(DISTILBERT_METRICS)
-    stats = load_json(DATASET_STATS)
-
-    with col1:
-        st.subheader('System Overview')
-
-        k1, k2, k3, k4 = st.columns(4)
-        b_kpi = get_external_kpis(baseline_metrics)
-        d_kpi = get_external_kpis(distilbert_metrics)
-
-        if d_kpi:
-            k1.metric('DistilBERT Accuracy', fmt_pct(d_kpi.get('accuracy')))
-            k2.metric('DistilBERT Recall (phish)', fmt_pct(d_kpi.get('recall_phish')))
-        else:
-            k1.metric('DistilBERT Accuracy', '-')
-            k2.metric('DistilBERT Recall (phish)', '-')
-
-        if b_kpi:
-            k3.metric('Baseline Accuracy', fmt_pct(b_kpi.get('accuracy')))
-            k4.metric('Baseline Recall (phish)', fmt_pct(b_kpi.get('recall_phish')))
-        else:
-            k3.metric('Baseline Accuracy', '-')
-            k4.metric('Baseline Recall (phish)', '-')
-
-        st.divider()
-        st.subheader('Dataset Snapshot')
-        if stats:
-            ds = stats.get('dataset_info', {})
-            cd = stats.get('class_distribution', {})
-            fs = stats.get('feature_statistics', {})
-
-            cA, cB, cC, cD = st.columns(4)
-            cA.metric('Total emails', fmt_count(ds.get('total_samples')))
-            cB.metric('Train', fmt_count(ds.get('train_samples')))
-            cC.metric('Val', fmt_count(ds.get('val_samples')))
-            cD.metric('Test', fmt_count(ds.get('test_samples')))
-
-            st.metric('Phishing ratio', fmt_pct(cd.get('phishing_ratio')))
-
-            f1c, f2c, f3c = st.columns(3)
-            f1c.metric('Avg URLs (phishing)', f"{fs.get('avg_urls_phishing', '-'):.2f}" if isinstance(fs.get('avg_urls_phishing'), (int, float)) else '-')
-            f2c.metric('Avg URLs (legit)', f"{fs.get('avg_urls_legitimate', '-'):.2f}" if isinstance(fs.get('avg_urls_legitimate'), (int, float)) else '-')
-            f3c.metric('Avg urgency (phishing)', f"{fs.get('avg_urgency_phishing', '-'):.2f}" if isinstance(fs.get('avg_urgency_phishing'), (int, float)) else '-')
-        else:
-            st.info('dataset_stats.json not found yet. Run your dataset preparation script to generate it.')
-
-    with col2:
-        st.subheader('Last Scan')
-        if st.session_state.last_result:
-            last = st.session_state.last_result
-            verdict_label = last.get('display_verdict', 'Unknown')
-            model_label = friendly_model_name(last.get('model', ''))
-            prob_value = last.get('phishing_probability')
-            threshold_value = float(last.get('threshold', st.session_state.threshold))
-            confidence_value = (
-                confidence_label(prob_value, threshold_value)
-                if isinstance(prob_value, (int, float))
-                else 'Unknown'
-            )
-            inference_ms = last.get('inference_ms')
-
-            k1, k2 = st.columns(2)
-            k1.metric('Result', verdict_label)
-            k2.metric('Model', model_label)
-
-            k3, k4 = st.columns(2)
-            k3.metric('Confidence', confidence_value)
-            k4.metric(
-                'Speed',
-                f"{float(inference_ms):.0f} ms" if isinstance(inference_ms, (int, float)) else '-'
-            )
-
-            if isinstance(prob_value, (int, float)):
-                st.progress(min(max(float(prob_value), 0.0), 1.0))
-                st.caption(f'Estimated phishing probability: {fmt_pct(prob_value)}')
-
-            if verdict_label == 'Phishing':
-                st.warning('The last scanned email looked suspicious and should be verified before any action is taken.')
-            elif confidence_value == 'Mixed':
-                st.info('The last scanned email was treated as legitimate, but it was close to the review boundary.')
-            else:
-                st.success('The last scanned email looked legitimate based on the current checks.')
-        else:
-            st.info('No emails have been scanned yet. Use the Scan Email tab to analyze a message.')
 
 with tab_scan:
     # Main scan workflow
-    st.subheader('Scan Email')
-    st.caption('Paste the body of an email or upload exported email files or previously saved readable documents. The classifier uses any extracted text together with the sender email and subject when available.')
+    render_page_heading('Scan Email')
+    st.caption('Paste the body of an email or upload exported emails or text documents. The classifier uses any extracted text together with the sender email and subject when available.')
 
     left, right = st.columns([1.15, 1])
 
@@ -758,7 +891,7 @@ with tab_scan:
         # Input panel
         st.markdown('#### Gmail import')
         if gmail_enabled:
-            st.caption('Import recent emails from your Gmail inbox to fill the form automatically. The first time you use this, Google will ask you to sign in.')
+            st.caption('Import recent emails from your Gmail inbox to fill the form automatically. The first time you use this locally, Google will ask you to sign in.')
             st.markdown('**Recent inbox emails**')
             gmail_col1, gmail_col2 = st.columns([1, 1])
             with gmail_col1:
@@ -773,11 +906,12 @@ with tab_scan:
                 import_gmail = st.button('Import recent emails', type='primary', use_container_width=True)
 
             if import_gmail:
-                gmail_result = import_recent_gmail_messages(
-                    GOOGLE_CREDENTIALS,
-                    GOOGLE_TOKEN,
-                    max_results=int(st.session_state.gmail_max_results),
-                )
+                with st.spinner('Importing recent Gmail previews...'):
+                    gmail_result = import_recent_gmail_messages(
+                        GOOGLE_CREDENTIALS,
+                        GOOGLE_TOKEN,
+                        max_results=int(st.session_state.gmail_max_results),
+                    )
                 st.session_state.gmail_messages = [asdict(item) for item in gmail_result.items]
                 st.session_state.gmail_import_warnings = gmail_result.warnings
                 if gmail_result.items:
@@ -786,10 +920,10 @@ with tab_scan:
                     st.session_state.scan_sender_email = first_item.get('sender_email', '')
                     st.session_state.scan_sender_context = first_item.get('sender_label') or first_item.get('sender_email', '')
                     st.session_state.scan_subject = first_item.get('subject', '')
-                    st.session_state.scan_email_text = first_item.get('body_text') or first_item.get('snippet', '')
+                    st.session_state.scan_email_text = first_item.get('snippet', '')
                     st.session_state.gmail_import_status = (
                         f"Imported {len(gmail_result.items)} inbox email(s). "
-                        'The first message has been loaded into the scan form.'
+                        'The first message preview has been loaded into the scan form.'
                     )
                     st.session_state.gmail_import_status_type = 'success'
                 else:
@@ -812,7 +946,7 @@ with tab_scan:
             for warning in st.session_state.gmail_import_warnings:
                 st.warning(warning)
         else:
-            st.caption('Gmail import is not enabled in this deployment because Google OAuth credentials are not configured.')
+            st.caption('Gmail import is not enabled because local Google OAuth credentials were not found.')
             import_gmail = False
 
         if gmail_enabled and st.session_state.gmail_messages:
@@ -827,6 +961,20 @@ with tab_scan:
             )
             if st.button('Load selected email', type='primary', use_container_width=True):
                 selected_message = st.session_state.gmail_messages[st.session_state.gmail_selected_index]
+                if not selected_message.get('body_loaded'):
+                    with st.spinner('Loading selected email...'):
+                        full_message, load_warnings = load_gmail_message_body(
+                            GOOGLE_CREDENTIALS,
+                            GOOGLE_TOKEN,
+                            selected_message.get('message_id', ''),
+                        )
+                    st.session_state.gmail_import_warnings.extend(load_warnings)
+                    if full_message is not None:
+                        selected_message.update(asdict(full_message))
+                        st.session_state.gmail_messages[st.session_state.gmail_selected_index] = selected_message
+                        st.session_state.gmail_import_status = 'The selected email has been fully loaded.'
+                        st.session_state.gmail_import_status_type = 'success'
+
                 st.session_state.scan_sender_email = selected_message.get('sender_email', '')
                 st.session_state.scan_sender_context = selected_message.get('sender_label') or selected_message.get('sender_email', '')
                 st.session_state.scan_subject = selected_message.get('subject', '')
@@ -839,18 +987,17 @@ with tab_scan:
         subject_line = st.text_input('Subject', key='scan_subject', label_visibility='collapsed')
         st.markdown('**Email Content**')
         email_text = st.text_area('Email Content', height=280, key='scan_email_text', label_visibility='collapsed')
-        st.markdown('**Upload exported emails or readable documents**')
+        st.markdown('**Upload exported emails or text documents**')
         uploaded_files = st.file_uploader(
-            'Upload exported emails or readable documents',
+            'Upload exported emails or text documents',
             type=[
                 'txt', 'text', 'md', 'rst', 'log', 'csv', 'tsv', 'json',
                 'yaml', 'yml', 'ini', 'cfg', 'xml', 'html', 'htm',
                 'docx', 'pdf', 'eml',
-                'png', 'jpg', 'jpeg', 'bmp', 'gif', 'webp', 'tif', 'tiff',
             ],
             accept_multiple_files=True,
             label_visibility='collapsed',
-            help='Do not open or run suspicious attachments just to analyse them here. Where possible, use exported .eml files or previously saved readable documents.',
+            help='Use exported .eml files or previously saved text-based documents. Screenshots and images are not supported.',
         )
         upload_context = build_upload_context(uploaded_files)
         st.caption('Safety note: avoid downloading or opening unknown live attachments.')
@@ -881,8 +1028,6 @@ with tab_scan:
         if run:
             model_choice = st.session_state.model_choice
             threshold = float(st.session_state.threshold)
-            show_explain = bool(st.session_state.show_explain)
-            advanced_mode = bool(st.session_state.advanced_mode)
             effective_sender = (sender_email or '').strip() or upload_context.sender_email
             effective_sender_context = (
                 st.session_state.scan_sender_context.strip()
@@ -908,240 +1053,230 @@ with tab_scan:
                 st.warning('Paste some email content or upload a file with readable text first.')
                 st.stop()
 
-            start = time.time()
+            with st.spinner(f'Analysing email with {friendly_model_name(model_choice)}...'):
+                start = time.time()
 
-            if model_choice == 'baseline':
-                # Baseline path
-                predictor = get_baseline_predictor()
-                result = predictor.predict(model_input, threshold=threshold)
-                evidence = baseline_evidence(model_input, predictor)
-                support_result = None
-                support_evidence = None
-            else:
-                # DistilBERT + baseline support
-                predictor = get_distilbert_predictor()
-                result = predictor.predict(model_input, threshold=threshold)
-                evidence = None
-                support_predictor = get_baseline_predictor()
-                support_result = support_predictor.predict(model_input, threshold=threshold)
-                support_evidence = baseline_evidence(model_input, support_predictor)
-
-            # Rule layer
-            rules = rule_based_evidence(combined_body, sender_email=effective_sender, subject=effective_subject)
-            verdict = compute_user_verdict(result, rules, support_result=support_result)
-            p_phish = float(verdict.get('display_prob', result.prob_phishing))
-            ms = (time.time() - start) * 1000.0
-            explanation_result = SimpleNamespace(
-                label=1 if verdict['label'] == 'Phishing' else 0,
-                prob_phishing=p_phish,
-                threshold=result.threshold,
-            )
-            summary = generate_explanation(
-                explanation_result,
-                evidence=evidence,
-                rule_evidence=rules,
-                display_label=verdict['label'],
-                display_prob=p_phish,
-            )
-
-            st.markdown(
-                f"""
-                <div class="result-card">
-                    <div class="result-label">{verdict['label']}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            if verdict['review_recommended']:
-                st.warning('Manual review is recommended for this message.')
-
-            if show_explain:
-                safe_summary = escape(summary).replace('\n', '<br>')
-                st.markdown(f"<div class='explanation-card'>{safe_summary}</div>", unsafe_allow_html=True)
-
-                risk_items = rules.get('signals', [])
-                reassurance_items = rules.get('reassurance_signals', [])
-                context_items = useful_context_items(rules.get('context_signals', []))
-
-                if risk_items or reassurance_items or context_items:
-                    st.markdown('### Why this result was given')
-                    render_signal_group('Warning signs', risk_items, '!')
-                    render_signal_group('Context that lowers risk', reassurance_items, '+')
-                    render_signal_group('Additional context', context_items, '')
+                if model_choice == 'baseline':
+                    # Baseline path
+                    predictor = get_baseline_predictor()
+                    result = predictor.predict(model_input, threshold=threshold)
+                    evidence = baseline_evidence(model_input, predictor)
+                    support_result = None
                 else:
-                    st.info('No strong rule-based indicators were found in the visible text. The result is mostly driven by the classifier output.')
+                    # DistilBERT + baseline support
+                    predictor = get_distilbert_predictor()
+                    result = predictor.predict(model_input, threshold=threshold)
+                    evidence = None
+                    support_predictor = get_baseline_predictor()
+                    support_result = support_predictor.predict(model_input, threshold=threshold)
 
-            st.progress(min(max(p_phish, 0.0), 1.0))
-            st.caption(f'Model: {result.model_name} | Inference time: {ms:.1f} ms')
-            if uploaded_files:
-                st.caption(f'Uploaded sources included: {len(uploaded_files)}')
+                rules = rule_based_evidence(combined_body, sender_email=effective_sender, subject=effective_subject)
+                verdict = compute_user_verdict(result, rules, support_result=support_result)
+                p_phish = float(verdict.get('display_prob', result.prob_phishing))
+                ms = (time.time() - start) * 1000.0
+                scanned_at = time.time()
+                explanation_result = SimpleNamespace(
+                    label=1 if verdict['label'] == 'Phishing' else 0,
+                    prob_phishing=p_phish,
+                    threshold=result.threshold,
+                )
+                summary = generate_explanation(
+                    explanation_result,
+                    evidence=evidence,
+                    rule_evidence=rules,
+                    display_label=verdict['label'],
+                    display_prob=p_phish,
+                )
 
-            if advanced_mode:
-                st.divider()
-                st.markdown('### Advanced details')
-                st.json({
-                    'model_label': result.label,
-                    'final_label': verdict['label'],
-                    'prob_phishing': float(result.prob_phishing),
-                    'decision_probability': p_phish,
-                    'support_probability': verdict.get('support_prob'),
-                    'threshold': result.threshold,
-                    'model_name': result.model_name,
-                    'decision_basis': verdict.get('decision_basis'),
-                    'effective_sender_email': effective_sender,
-                    'effective_subject': effective_subject,
-                    'uploaded_files': [item.filename for item in upload_context.items],
-                    'rule_evidence': rules,
-                    'model_evidence': evidence,
-                    'support_model_evidence': support_evidence,
-                })
+            risk_items = rules.get('signals', [])
+            reassurance_items = rules.get('reassurance_signals', [])
+            context_items = useful_context_items(rules.get('context_signals', []))
+            risk_level = get_risk_level(
+                verdict['label'],
+                p_phish,
+                result.threshold,
+                bool(verdict['review_recommended']),
+            )
+            advice = result_advice(verdict['label'], risk_level, p_phish, result.threshold)
 
-            if model_choice == 'distilbert':
-                st.caption('Token-level attribution can be added later. The explanation currently uses model output, rule signals, and any available support evidence.')
+            render_result_summary(verdict, risk_level, result.model_name, advice, p_phish)
 
-            st.session_state.last_result = {
+            render_explanation_sections(
+                summary=summary,
+                rules=rules,
+                risk_items=risk_items,
+                reassurance_items=reassurance_items,
+                context_items=context_items,
+                expanded=False,
+            )
+
+            history_entry = {
                 'model': result.model_name,
                 'threshold': float(threshold),
                 'display_verdict': verdict['label'],
+                'risk_level': risk_level,
+                'advice': advice,
                 'phishing_probability': float(p_phish),
                 'risk_score': float(rules.get('risk_score', 0.0)),
                 'inference_ms': float(ms),
+                'review_recommended': bool(verdict['review_recommended']),
+                'sender_email': effective_sender,
+                'subject': effective_subject,
+                'scanned_at_ts': scanned_at,
+                'explanation_summary': summary,
+                'warning_signals': risk_items,
+                'reassurance_signals': reassurance_items,
+                'context_signals': context_items,
             }
+            st.session_state.last_result = history_entry
+            st.session_state.recent_activity = prune_recent_activity(
+                [history_entry, *st.session_state.recent_activity]
+            )
         else:
             st.markdown("<p class='small-note'>The result card, explanation, and user-friendly signals will appear here after analysis.</p>", unsafe_allow_html=True)
             st.info('Example output: Likely phishing / Suspicious - review recommended / Likely legitimate')
 
-with tab_analysis:
-    # Saved evaluation artefacts
-    baseline_internal_metrics = load_json(BASELINE_INTERNAL_METRICS)
-    distilbert_internal_metrics = load_json(DISTILBERT_INTERNAL_METRICS)
-    baseline_metrics = load_json(BASELINE_METRICS)
-    distilbert_metrics = load_json(DISTILBERT_METRICS)
-    training_rows = []
-    external_rows = []
+with tab_activity:
+    render_page_heading('Recent Activity')
+    st.caption('Recent activity is kept only for this session. It can be cleared manually and expires after 24 hours.')
 
-    if baseline_internal_metrics:
-        k = get_internal_kpis(baseline_internal_metrics)
-        if k:
-            training_rows.append({
-                'Model': 'Baseline (TF-IDF + Logistic Regression)',
-                'Accuracy': k.get('accuracy'),
-                'Precision (phish)': k.get('precision_phish'),
-                'Recall (phish)': k.get('recall_phish'),
-                'F1 (phish)': k.get('f1_phish'),
-                'False positive rate': k.get('false_positive_rate'),
-                'False negative rate': k.get('false_negative_rate'),
-            })
+    if st.button('Clear History'):
+        st.session_state.recent_activity = []
+        st.session_state.last_result = None
+        st.rerun()
 
-    if distilbert_internal_metrics:
-        k = get_internal_kpis(distilbert_internal_metrics)
-        if k:
-            training_rows.append({
-                'Model': 'DistilBERT',
-                'Accuracy': k.get('accuracy'),
-                'Precision (phish)': k.get('precision_phish'),
-                'Recall (phish)': k.get('recall_phish'),
-                'F1 (phish)': k.get('f1_phish'),
-                'False positive rate': k.get('false_positive_rate'),
-                'False negative rate': k.get('false_negative_rate'),
-            })
+    history = prune_recent_activity(st.session_state.recent_activity)
+    st.session_state.recent_activity = history
 
-    if baseline_metrics:
-        k = get_external_kpis(baseline_metrics)
-        if k:
-            external_rows.append({
-                'Model': 'Baseline (TF-IDF + Logistic Regression)',
-                'Accuracy': k.get('accuracy'),
-                'Precision (phish)': k.get('precision_phish'),
-                'Recall (phish)': k.get('recall_phish'),
-                'F1 (phish)': k.get('f1_phish'),
-                'False positive rate': k.get('false_positive_rate'),
-                'False negative rate': k.get('false_negative_rate'),
-            })
-
-    if distilbert_metrics:
-        k = get_external_kpis(distilbert_metrics)
-        if k:
-            external_rows.append({
-                'Model': 'DistilBERT',
-                'Accuracy': k.get('accuracy'),
-                'Precision (phish)': k.get('precision_phish'),
-                'Recall (phish)': k.get('recall_phish'),
-                'F1 (phish)': k.get('f1_phish'),
-            'False positive rate': k.get('false_positive_rate'),
-            'False negative rate': k.get('false_negative_rate'),
-        })
-
-    if training_rows:
-        st.markdown('### Model training results (Kaggle)')
-        render_metrics_table(training_rows)
-        st.caption('These are the original split results saved from the model training artefacts. They provide an in-domain benchmark before external validation on a separate dataset.')
-        st.divider()
-
-    st.markdown('### External validation results (TREC-06)')
-    if external_rows:
-        render_metrics_table(external_rows)
-        st.caption('These results show model performance on a separate external dataset and therefore provide a more realistic indication of generalisation')
+    if not history:
+        st.info('No emails have been scanned yet. Use the Scan Email tab to analyze a message.')
     else:
-        st.info('External metrics not found yet. Add files to results/external/.')
+        for item in history:
+            verdict = item.get('display_verdict', 'Unknown')
+            sender = item.get('sender_email') or 'Unknown sender'
+            subject = item.get('subject') or '(no subject)'
+            model_label = friendly_model_name(item.get('model', ''))
+            scanned_label = activity_time_label(item.get('scanned_at_ts'))
+            summary = item.get('explanation_summary', '')
+            warning_signals = item.get('warning_signals') or []
+            reassurance_signals = item.get('reassurance_signals') or []
+            context_signals = item.get('context_signals') or []
 
-    st.divider()
-    st.markdown('### Confusion matrices: model training results (Kaggle)')
-    c1, c2 = st.columns(2)
+            with st.container(border=True):
+                top_left, top_right = st.columns([3, 1.3])
+                with top_left:
+                    st.markdown(f"**Subject:** {subject}")
+                    st.markdown(f"**Sender:** {sender}")
+                    st.caption(f'Scanned: {scanned_label}')
+                with top_right:
+                    st.markdown(f"**Verdict:** {verdict}")
+                    if item.get('review_recommended'):
+                        st.caption('Review recommended')
 
-    with c1:
-        if BASELINE_INTERNAL_CM_IMG.exists():
-            st.image(str(BASELINE_INTERNAL_CM_IMG), use_container_width=True)
-        else:
-            st.caption('Baseline internal confusion matrix image not found.')
+                meta1, meta2 = st.columns(2)
+                meta1.caption(f'Model: {model_label}')
+                meta2.caption(f'Saved: {scanned_label}')
 
-    with c2:
-        if DISTILBERT_INTERNAL_CM_IMG.exists():
-            st.image(str(DISTILBERT_INTERNAL_CM_IMG), use_container_width=True)
-        else:
-            st.caption('DistilBERT internal confusion matrix image not found.')
+                with st.expander('View saved explanation'):
+                    if summary:
+                        safe_summary = escape(summary).replace('\n', '<br>')
+                        st.markdown(
+                            f"<div class='explanation-card'>{safe_summary}</div>",
+                            unsafe_allow_html=True,
+                        )
 
-    st.divider()
-    st.markdown('### Confusion matrices: external validation (TREC-06)')
-    c1, c2 = st.columns(2)
+                        if warning_signals or reassurance_signals or context_signals:
+                            render_signal_group('Warning signs', warning_signals, '!')
+                            render_signal_group('Context that lowers risk', reassurance_signals, '+')
+                            render_signal_group('Additional context', context_signals, '')
+                    else:
+                        st.info('This scan was saved before explanation snapshots were added to Recent Activity.')
 
-    with c1:
-        if BASELINE_CM_IMG.exists():
-            st.image(str(BASELINE_CM_IMG), use_container_width=True)
-        else:
-            st.caption('Baseline confusion matrix image not found.')
+with tab_about:
+    render_page_heading('About')
+    st.write('Veridexia is a phishing email detection application that combines ML classification with evidence-supported explanations.')
 
-    with c2:
-        if DISTILBERT_CM_IMG.exists():
-            st.image(str(DISTILBERT_CM_IMG), use_container_width=True)
-        else:
-            st.caption('DistilBERT confusion matrix image not found.')
-
-with tab_settings:
-    # Quick guide
-    st.subheader('Guide')
-    st.write('This page summarises the current app profile and gives a few practical tips for cleaner scans.')
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric('Active model', friendly_model_name(st.session_state.model_choice))
-    c2.metric('Sensitivity', st.session_state.detection_sensitivity)
-    c3.metric('Explanation', 'On' if st.session_state.show_explain else 'Off')
-    c4.metric('Advanced', 'On' if st.session_state.advanced_mode else 'Off')
-    if st.session_state.advanced_mode:
-        st.caption(f"Underlying phishing threshold: {float(st.session_state.threshold):.2f}")
-
-    st.divider()
-    st.markdown('### Scan tips')
+    st.markdown('### What Veridexia does')
     st.markdown(
         """
-        - Include the sender email and subject when you have them. They help the scan use more context.
-        - Use the full message where possible rather than a short extract.
-        - Gmail import is useful for testing realistic inbox emails without copying and pasting each message manually.
-        - Uploaded files work best for exported emails or readable documents such as `.eml`, `.txt`, `.docx`, or `.pdf`.
-        - Avoid downloading or opening unknown live attachments just to analyse them in the demo.
-        - Newsletters, job alerts, and account notices can still trigger review warnings, so read the explanation as well as the final label.
-        - Treat `review recommended` as a caution signal, even when the final label is legitimate.
+        Veridexia analyses email text and estimates whether it is likely to be phishing or legitimate.
+        It also highlights suspicious signals such as urgency, credential requests, links, and impersonation patterns.
         """
     )
+
+    st.markdown('### Privacy and data handling')
+    st.markdown(
+        """
+        - This application does not write scanned emails to a database.
+        - Recent Activity is kept only in the current session and can be cleared at any time.
+        - The session history is automatically cleared after 24 hours.
+        - Email content is processed only to generate the current classification and explanation.
+        """
+    )
+
+    st.markdown('### Limitations and disclaimer')
+    st.markdown(
+        """
+        Veridexia is a decision-support tool. It may produce false positives or false negatives,
+        so results should be reviewed alongside the email context and user judgement.
+        """
+    )
+
+    st.markdown('### Google sign-in')
+    st.markdown(
+        """
+        If Gmail import is used, sign-in is handled through Google OAuth.
+        This app never sees or stores your Google password directly.
+        """
+    )
+
+    st.markdown('### Version')
+    st.code(APP_VERSION)
+
+    st.markdown('### Support')
+    st.markdown(f'[Project page / support]({SUPPORT_URL})')
+
+with tab_guide:
+    render_page_heading('Guide')
+    st.write('This page explains how to get cleaner scan results and how Gmail import works.')
+
+    st.divider()
+    st.markdown('### For best results')
+    st.info(
+        'Include the sender, subject, and full email body where possible. '
+        'Short extracts may remove useful context and make the scan less reliable.'
+    )
+
+    st.divider()
+    st.markdown('### Supported inputs')
+    st.markdown(
+        """
+        You can paste email text directly, import from Gmail, or upload readable files such as
+        `.eml`, `.txt`, `.docx`, or `.pdf`.
+        """
+    )
+
+    st.divider()
+    st.markdown('### Understanding results')
+    st.markdown(
+        """
+        Always read the explanation as well as the final phishing or legitimate label.
+        Some legitimate emails, such as newsletters, job alerts, and account notices, may still trigger warning signs.
+        """
+    )
+    st.info('Review recommended means the email contains signals that should be checked manually.')
+
+    st.divider()
+    st.markdown('### Gmail import and OAuth')
+    st.markdown(
+        """
+        Gmail import uses Google OAuth sign-in. Google handles the sign-in screen directly,
+        so Veridexia does not see or store your Google password.
+        """
+    )
+
+    st.divider()
+    st.markdown('### Safety note')
+    st.warning('Do not download or open unknown live attachments just to analyse them in the demo.')
 
 
