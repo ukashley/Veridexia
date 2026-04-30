@@ -59,32 +59,14 @@ Google API packages for optional read-only Gmail import
 Gmail import requires local OAuth files. The files credentials.json and token.json are intentionally ignored by Git and should not be committed.
 
 ## Repository Structure
-```markdown
-AI-Powered Phishing Detector/
-├── app/
-│   └── app.py
-├── data/
-│   ├── phishing_email.csv
-│   ├── TREC-06.csv
-│   └── processed/
-├── models/
-│   ├── baseline/
-│   └── distilbert/
-├── notebooks/
-│   └── eda.ipynb
-├── results/
-│   └── external/
-├── scripts/
-│   ├── prepare_dataset.py
-│   ├── train_baseline.py
-│   ├── train.py
-│   ├── eval_baseline.py
-│   ├── eval_distilbert.py
-│   └── compare_models.py
-├── src/
-│   ├── explain/
-│   └── inference/
-├── requirements.txt
+```text
+app/        Streamlit user interface
+src/        inference, explanation, Gmail import, and upload extraction logic
+models/     saved baseline and DistilBERT model artefacts
+results/    evaluation outputs and figures
+data/       generated dataset statistics and processed artefacts
+notebooks/  exploratory analysis notebook
+scripts/    training, evaluation and utility scripts
 ```
 
 ## Models And Data
