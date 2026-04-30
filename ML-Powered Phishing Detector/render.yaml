@@ -1,7 +1,0 @@
-services:
-  - type: web
-    name: veridexia
-    runtime: python
-    buildCommand: pip install -r requirements-render.txt
-    startCommand: streamlit run app/app.py --server.address 0.0.0.0 --server.port $PORT --server.headless true
-    autoDeploy: true
