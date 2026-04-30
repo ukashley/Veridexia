@@ -51,12 +51,22 @@ Using python -m streamlit is recommended because it ensures Streamlit runs with 
 ## Dependencies And Installation
 The main dependencies are listed in requirements.txt. They include:
 
-streamlit for the web prototype
-pandas, numpy and scikit-learn for data processing and the baseline model
-transformers, datasets, torch and accelerate for DistilBERT training/inference
-beautifulsoup4, pypdf, Pillow and pytesseract for upload text extraction
-Google API packages for optional read-only Gmail import
-Gmail import requires local OAuth files. The files credentials.json and token.json are intentionally ignored by Git and should not be committed.
+- streamlit for the web prototype
+
+- pandas, numpy and scikit-learn for data processing and the baseline model
+
+- transformers, datasets, torch and accelerate for DistilBERT training/inference
+
+- beautifulsoup4, pypdf, Pillow and pytesseract for upload text extraction
+
+- Gmail import is intended for local demonstration. To use it, place a valid Google OAuth `credentials.json` file in the project root. The first time Gmail import is used, Google will open a browser sign-in flow and create a local `token.json` file.:
+
+```text
+credentials.json
+token.json
+client_secret_*.json
+.streamlit/secrets.toml
+```
 
 ## Repository Structure
 ```text
