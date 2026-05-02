@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import re
+from html import unescape
 from urllib.parse import urlparse
 
+# This file is the evidence layer, not a replacement classifier.
+# It extracts readable warning and reassurance signals so the app can explain model outputs.
 INVISIBLE_TRANSLATION = str.maketrans('', '', '\u200b\u200c\u200d\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\ufeff')
 URL_RE = re.compile(r'hxxps?://\S+|https?://\S+|www\.\S+', re.I)
 EMAIL_RE = re.compile(r'\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b', re.I)
@@ -17,10 +20,25 @@ CREDENTIAL_REQUEST_PATTERNS = [
 SECURITY_NOTIFICATION_PATTERNS = [
     r'\byour password (was|has been) (changed|reset|updated)\b',
     r'\bif you did not (make|request|initiate|authorise|authorize) this (change|reset|request)\b',
+    r'\bnew device (?:log ?in|login) detected\b',
+    r'\bdetected a login to your account from a new device\b',
+    r'\bwe detected a login to your account\b',
+    r'\bif this was you, you can ignore this message\b',
+    r'\bsecurity alerts?\b',
+    r'\b2[- ]step verification\b',
     r'\bcontact (support|customer service|the helpdesk|the service desk)\b',
     r'\bwe will never ask for your password\b',
     r'\bwe will never ask you to reply by email with your (password|card number|bank details?)\b',
     r'\bwe will never ask (?:you )?for (?:your )?(password|card number|bank details?)\b',
+]
+
+IN_APP_SECURITY_INSTRUCTION_PATTERNS = [
+    r'\bopen the [a-z0-9 ._-]{1,30} app\b',
+    r'\bgo to ["“]?(settings and privacy|settings|security and login|security alerts)["”]?\b',
+    r'\breview unauthori[sz]ed logins?\b',
+    r'\bcontact [a-z0-9 ._-]{1,30} support\b',
+    r'\bautomatically generated email\b',
+    r'\breplies to this email address (?:are not|aren[’\']t) monitored\b',
 ]
 
 IDENTITY_VERIFICATION_PATTERNS = [
@@ -81,9 +99,25 @@ NEWSLETTER_PATTERNS = [
     r'\bunsubscribe\b',
     r'\bmanage (?:your )?(?:email )?preferences\b',
     r'\bview (?:this )?email in (?:your )?browser\b',
+    r'\bview this email as a web page\b',
     r'\bwhy did i get this email\b',
     r'\bmailing list\b',
     r'\bnewsletter\b',
+    r'\bopted-?in to receive newsletters?\b',
+    r'\bif you no longer want to receive our newsletters?\b',
+    r'\badd us to your contact list\b',
+]
+
+MARKETING_EMAIL_PATTERNS = [
+    r'\bsubject to availability\b',
+    r'\bt&cs apply\b',
+    r'\bprivacy policy\b',
+    r'\bupdate profile\b',
+    r'\bthis email was sent by\b',
+    r'\boffer ends\b',
+    r'\bselected restaurants?\b',
+    r'\bparticipating (?:stores?|restaurants?)\b',
+    r'\bcustomer service\b',
 ]
 
 JOB_ALERT_PATTERNS = [
@@ -99,6 +133,7 @@ JOB_ALERT_PATTERNS = [
 RECIPIENT_EMAIL_PATTERNS = [
     r'(?:this message was sent to|this email was sent to|sent to)\s+([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})',
     r'(?:you are receiving this email at|you are receiving this message at)\s+([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})',
+    r'\bwith\s+(?:mailto:)?\s*([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})',
 ]
 
 ACCOUNT_ADMINISTRATION_PATTERNS = [
@@ -115,7 +150,12 @@ GENERIC_GREETING_PATTERNS = [
 GENERIC_BRAND_TOKENS = {
     'mail', 'email', 'teamtailor', 'noreply', 'reply', 'support', 'service',
     'help', 'alerts', 'notice', 'notify', 'news', 'info', 'com', 'co', 'uk',
-    'org', 'net',
+    'org', 'net', 'update', 'updates', 'newsletter',
+}
+
+PERSONAL_EMAIL_DOMAINS = {
+    'gmail.com', 'outlook.com', 'hotmail.com', 'yahoo.com', 'icloud.com',
+    'live.com', 'aol.com', 'proton.me', 'protonmail.com',
 }
 
 
@@ -178,7 +218,8 @@ def _compact_text(text: str) -> str:
 
 
 def _normalize_text(text: str) -> str:
-    cleaned = (text or '').translate(INVISIBLE_TRANSLATION).replace('\u00a0', ' ')
+    # Decode literal HTML entities such as &zwnj; before removing hidden characters.
+    cleaned = unescape(text or '').translate(INVISIBLE_TRANSLATION).replace('\u00a0', ' ')
     cleaned = re.sub(r'[ \t]+', ' ', cleaned)
     cleaned = re.sub(r' ?\n ?', '\n', cleaned)
     return cleaned.strip()
@@ -218,6 +259,8 @@ def _signal(key: str, title: str, description: str, score: float, matches=None, 
 
 
 def _url_signal(urls):
+    # Links are common in legitimate emails, so the score increases only when
+    # the visible link itself has suspicious properties.
     if not urls:
         return None
 
@@ -268,6 +311,8 @@ def _url_signal(urls):
 
 
 def _sender_domain_signal(sender_domain: str):
+    # Sender-domain features catch obviously suspicious domain wording without
+    # treating every unknown sender as malicious.
     if not sender_domain:
         return None
 
@@ -275,7 +320,7 @@ def _sender_domain_signal(sender_domain: str):
     reasons = []
     host = sender_domain.lower()
 
-    if any(token in host for token in ['login', 'verify', 'secure', 'reset', 'update', 'account']):
+    if any(token in host for token in ['login', 'verify', 'secure', 'reset']):
         risk += 0.7
         reasons.append('contains phishing-style sender terms')
 
@@ -298,6 +343,8 @@ def _sender_domain_signal(sender_domain: str):
 
 
 def rule_based_evidence(text: str, sender_email: str = "", subject: str = ""):
+    # Main evidence extraction function used after each prediction.
+    # It returns risk signals, reassurance signals, neutral context, and a small score.
     raw_text = _normalize_text(text)
     text_l = re.sub(r'\s+', ' ', raw_text.lower()).strip()
     subject_l = re.sub(r'\s+', ' ', _normalize_text(subject).lower()).strip()
@@ -316,7 +363,13 @@ def rule_based_evidence(text: str, sender_email: str = "", subject: str = ""):
     sender_base_domain = _base_domain(sender_domain)
     url_domains = _url_domains(urls)
     recipient_domains = _recipient_domains(raw_text)
-    body_domains = sorted({_domain(e) for e in emails if _domain(e) and _domain(e) not in recipient_domains})
+    body_domains = sorted({
+        _domain(e)
+        for e in emails
+        if _domain(e)
+        and _domain(e) not in recipient_domains
+        and _domain(e) not in PERSONAL_EMAIL_DOMAINS
+    })
 
     credential_hits = _find_matches(CREDENTIAL_REQUEST_PATTERNS, combined_l)
     if credential_hits:
@@ -337,6 +390,17 @@ def rule_based_evidence(text: str, sender_email: str = "", subject: str = ""):
             'The wording looks more like a password-change notice or security alert than a direct request to hand over credentials.',
             -1.8,
             security_hits,
+            'reassurance',
+        ))
+
+    in_app_security_hits = _find_matches(IN_APP_SECURITY_INSTRUCTION_PATTERNS, text_l)
+    if in_app_security_hits:
+        reassurance_signals.append(_signal(
+            'in_app_security_instruction',
+            'In-app security instruction',
+            'The message tells the user to review the event inside the official app or support flow rather than handing over credentials by email.',
+            -1.4,
+            in_app_security_hits,
             'reassurance',
         ))
 
@@ -424,6 +488,17 @@ def rule_based_evidence(text: str, sender_email: str = "", subject: str = ""):
             'The message contains typical newsletter or mailing-list wording, which often appears in legitimate promotional or update emails.',
             -0.8,
             newsletter_hits,
+            'reassurance',
+        ))
+
+    marketing_hits = _find_matches(MARKETING_EMAIL_PATTERNS, combined_l)
+    if marketing_hits and newsletter_hits:
+        reassurance_signals.append(_signal(
+            'marketing_promotion_context',
+            'Marketing or promotional email context',
+            'The message contains typical promotional email details such as terms, unsubscribe/profile wording, or offer information.',
+            -1.0,
+            marketing_hits,
             'reassurance',
         ))
 
@@ -519,6 +594,21 @@ def rule_based_evidence(text: str, sender_email: str = "", subject: str = ""):
             'reassurance',
         ))
 
+    brand_tokens = _brand_tokens(sender_email)
+    brand_related_domains = [
+        domain for domain in url_domains
+        if any(_compact_text(token) in _compact_text(domain) for token in brand_tokens)
+    ]
+    if brand_related_domains:
+        reassurance_signals.append(_signal(
+            'brand_related_link',
+            'Brand-related link domain',
+            'One or more visible link domains contain the sender brand name, which supports a legitimate marketing or service context.',
+            -0.7,
+            brand_related_domains[:2],
+            'reassurance',
+        ))
+
     if sender_base_domain and any(
         re.search(rf'\b(?:hxxps?://|https?://|www\.)[^\s]+{re.escape(sender_base_domain)}', raw_text, flags=re.I)
         and re.search(r'\b(website|official website|customer portal)\b', combined_l)
@@ -537,7 +627,7 @@ def rule_based_evidence(text: str, sender_email: str = "", subject: str = ""):
         reassurance_signals.append(_signal(
             'no_email_credential_request',
             'No email credential request',
-            'The message explicitly says not to reply by email with passwords, card numbers, or bank details.',
+            'The message is framed as a notification rather than a direct request to reply with passwords, card numbers, or login codes.',
             -1.0,
             security_hits,
             'reassurance',
@@ -573,4 +663,5 @@ def rule_based_evidence(text: str, sender_email: str = "", subject: str = ""):
         'has_urgency': any(s['key'] == 'urgency' for s in risk_signals),
         'has_threat': any(s['key'] == 'threat_language' for s in risk_signals),
         'has_security_notification': any(s['key'] == 'security_notification' for s in reassurance_signals),
+        'has_in_app_security_instruction': any(s['key'] == 'in_app_security_instruction' for s in reassurance_signals),
     }

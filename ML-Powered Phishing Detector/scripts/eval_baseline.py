@@ -17,6 +17,7 @@ text_col = next(c for c in TEXT_COLS if c in df.columns)
 X = df[text_col].astype(str)
 y = df["label"].astype(int)
 
+# Reuse the exact saved baseline artefacts from internal training.
 vectorizer = joblib.load(VEC_PATH)
 model = joblib.load(MODEL_PATH)
 

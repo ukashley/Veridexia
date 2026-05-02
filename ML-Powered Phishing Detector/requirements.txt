@@ -16,9 +16,6 @@ accelerate
 evaluate
 streamlit
 beautifulsoup4
-Pillow
-pypdf
-pytesseract
 google-api-python-client
 google-auth-httplib2
 google-auth-oauthlib

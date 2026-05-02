@@ -6,22 +6,29 @@ from pathlib import Path
 import json
 import re
 import time
-from html import escape
+from html import escape, unescape
 from types import SimpleNamespace
 
 import streamlit as st
-import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.display_helpers import (
+    activity_time_label,
+    format_gmail_message_label,
+    friendly_model_name,
+    render_explanation_sections,
+    render_result_summary,
+    render_signal_group,
+)
 from src.inference.baseline import BaselinePredictor
 from src.inference.gmail_import import import_recent_gmail_messages, load_gmail_message_body
-from src.inference.upload_extractors import build_upload_context
 from src.explain.baseline_evidence import baseline_evidence
 from src.explain.nlg import generate_explanation
 from src.explain.rule_evidence import rule_based_evidence
+from src.verdict_logic import compute_user_verdict, get_risk_level, result_advice
 
 DATASET_STATS = ROOT / 'data' / 'processed' / 'dataset_stats.json'
 BASELINE_DIR = ROOT / 'models' / 'baseline'
@@ -39,7 +46,7 @@ DISTILBERT_REQUIRED_FILES = (
     'model.safetensors',
 )
 
-# Saved artefacts
+# Saved artefacts used by the Model/Results views.
 BASELINE_METRICS = RESULTS_DIR / 'trec06_baseline_metrics.json'
 DISTILBERT_METRICS = RESULTS_DIR / 'trec06_distilbert_metrics.json'
 BASELINE_INTERNAL_METRICS = BASELINE_DIR / 'metrics.json'
@@ -73,20 +80,6 @@ def load_json(path: Path):
         return json.loads(path.read_text(encoding='utf-8'))
     except Exception:
         return None
-
-
-def fmt_pct(x):
-    try:
-        return f'{float(x) * 100:.2f}%'
-    except Exception:
-        return '-'
-
-
-def fmt_count(x):
-    try:
-        return f'{int(x):,}'
-    except Exception:
-        return '-'
 
 
 def get_external_kpis(m: dict):
@@ -158,60 +151,6 @@ def get_internal_kpis(m: dict):
     }
 
 
-def render_metrics_table(rows: list[dict]):
-    if not rows:
-        return
-
-    df = pd.DataFrame(rows)
-    for col in [
-        'Accuracy',
-        'Precision (phish)',
-        'Recall (phish)',
-        'F1 (phish)',
-        'False positive rate',
-        'False negative rate',
-    ]:
-        if col in df.columns:
-            df[col] = df[col].apply(lambda x: fmt_pct(x) if isinstance(x, (int, float)) else '-')
-    html = df.to_html(index=False)
-    st.markdown(f"<div class='big-table'>{html}</div>", unsafe_allow_html=True)
-
-
-def severity_color(level: str):
-    return {
-        'high': 'High risk',
-        'medium': 'Moderate risk',
-        'review': 'Needs review',
-        'low': 'Low risk',
-    }.get(level, 'Needs review')
-
-
-def format_gmail_message_label(item: dict) -> str:
-    subject = (item.get('subject') or '(no subject)').strip()
-    sender = (item.get('sender_email') or item.get('sender_label') or 'unknown sender').strip()
-    received = (item.get('received_at') or '').strip()
-    if received:
-        return f'{subject} - {sender} ({received})'
-    return f'{subject} - {sender}'
-
-
-def friendly_model_name(model_name: str) -> str:
-    return {
-        'distilbert': 'DistilBERT',
-        'baseline': 'Baseline',
-        'baseline_tfidf_lr': 'Baseline',
-    }.get((model_name or '').strip().lower(), model_name or 'Unknown')
-
-
-def confidence_label(prob: float, threshold: float):
-    gap = abs(float(prob) - float(threshold))
-    if gap >= 0.25:
-        return 'High'
-    if gap >= 0.12:
-        return 'Moderate'
-    return 'Mixed'
-
-
 def threshold_for_sensitivity(level: str) -> float:
     return float(SENSITIVITY_THRESHOLDS.get(level, SENSITIVITY_THRESHOLDS['Balanced']))
 
@@ -237,16 +176,12 @@ def prune_recent_activity(entries: list[dict]) -> list[dict]:
     return fresh[:RECENT_ACTIVITY_LIMIT]
 
 
-def activity_time_label(scanned_at: float | None) -> str:
-    if not isinstance(scanned_at, (int, float)):
-        return 'Unknown time'
-    return time.strftime('%Y-%m-%d %H:%M', time.localtime(float(scanned_at)))
-
-
 def normalize_message_text(text: str) -> str:
     if not text:
         return ''
-    cleaned = str(text).translate(INVISIBLE_TRANSLATION).replace('\u00a0', ' ')
+    # Gmail/exported email text can contain literal HTML entities such as &zwnj;.
+    # Decode them before removing hidden characters so model input is less noisy.
+    cleaned = unescape(str(text)).translate(INVISIBLE_TRANSLATION).replace('\u00a0', ' ')
     cleaned = re.sub(r'[ \t]+', ' ', cleaned)
     cleaned = re.sub(r' ?\n ?', '\n', cleaned)
     return cleaned.strip()
@@ -264,275 +199,6 @@ def sensitivity_for_threshold(threshold: float) -> str:
     )
 
 
-def compute_user_verdict(result, rules: dict, support_result=None):
-    prob = float(result.prob_phishing)
-    threshold = float(result.threshold)
-    risk_items = rules.get('signals', [])
-    reassurance_items = rules.get('reassurance_signals', [])
-    context_items = rules.get('context_signals', [])
-    risk_keys = {item.get('key') for item in risk_items}
-    reassurance_keys = {item.get('key') for item in reassurance_items}
-    context_keys = {item.get('key') for item in context_items}
-    risk_score = float(rules.get('risk_score', 0.0))
-    support_prob = None if support_result is None else float(support_result.prob_phishing)
-    risk_count = len(risk_items)
-
-    no_strong_cues = (
-        not bool(rules.get("has_credential_request"))
-        and not bool(rules.get("has_threat"))
-        and not bool(rules.get("has_urgency"))
-        and int(rules.get("url_count", 0)) == 0
-    )
-
-    # High-risk cues
-    dangerous_risk_keys = {
-        'credential_request',
-        'threat_language',
-        'suspicious_link',
-        'domain_mismatch',
-        'suspicious_sender_domain',
-    }
-    no_dangerous_cues = not bool(dangerous_risk_keys & risk_keys)
-    has_model_support = support_prob is not None
-    max_model_prob = max(prob, support_prob if support_prob is not None else 0.0)
-    strong_phishing_combo = (
-        (
-            'credential_request' in risk_keys
-            and (
-                bool({'urgency', 'threat_language', 'suspicious_link', 'domain_mismatch', 'suspicious_sender_domain'} & risk_keys)
-                or max_model_prob >= 0.55
-            )
-        )
-        or (
-            'suspicious_link' in risk_keys
-            and (
-                bool({'domain_mismatch', 'suspicious_sender_domain'} & risk_keys)
-                or max_model_prob >= threshold
-            )
-        )
-        or (
-            risk_score >= 3.0
-            and max_model_prob >= 0.45
-        )
-    )
-
-    near_boundary = abs(prob - threshold) < 0.12
-    review_recommended = near_boundary or (prob >= threshold and (no_strong_cues or no_dangerous_cues))
-    benign_context = (
-        'sender_email_present' in context_keys
-        and 'email_address_present' in context_keys
-        and 'domain_mismatch' not in risk_keys
-        and 'suspicious_link' not in risk_keys
-    )
-    clean_message = no_strong_cues and risk_score <= 0 and 'domain_mismatch' not in risk_keys and 'suspicious_link' not in risk_keys
-    low_severity_risk_keys = {'payment_language', 'generic_greeting'}
-    low_severity_only = bool(risk_keys) and risk_keys.issubset(low_severity_risk_keys)
-
-    # Routine categories
-    routine_message_keys = {
-        'transactional_notification',
-        'account_administration_notice',
-        'newsletter_context',
-        'job_alert_context',
-        'identity_verification_context',
-        'formal_service_message',
-    }
-    trusted_service_keys = {
-        'sender_brand_match',
-        'domain_match',
-        'link_domain_match',
-        'official_website_present',
-        'support_contact_present',
-        'no_email_credential_request',
-        'security_notification',
-    }
-    transactional_reassurance = bool(
-        (routine_message_keys | trusted_service_keys) & reassurance_keys
-    )
-    strong_benign_reassurance = bool(
-        routine_message_keys & reassurance_keys
-    ) and bool({'sender_brand_match', 'domain_match', 'link_domain_match'} & reassurance_keys)
-    trusted_service_context = (
-        no_dangerous_cues
-        and 'domain_mismatch' not in risk_keys
-        and 'suspicious_link' not in risk_keys
-        and bool({'sender_brand_match', 'domain_match', 'link_domain_match'} & reassurance_keys)
-        and bool({'transactional_notification', 'formal_service_message', 'support_contact_present', 'official_website_present'} & reassurance_keys)
-        and bool({'no_email_credential_request', 'security_notification'} & reassurance_keys)
-        and risk_score <= 1.2
-    )
-    safe_routine_message = (
-        bool(routine_message_keys & reassurance_keys)
-        and no_dangerous_cues
-        and 'domain_mismatch' not in risk_keys
-        and 'suspicious_link' not in risk_keys
-        and risk_score <= 0
-    )
-    benign_model_disagreement = (
-        prob >= threshold
-        and has_model_support
-        and support_prob <= 0.45
-        and no_dangerous_cues
-        and risk_score <= 0.5
-        and (
-            bool(routine_message_keys & reassurance_keys)
-            or bool({'sender_brand_match', 'domain_match', 'link_domain_match', 'security_notification', 'identity_verification_context'} & reassurance_keys)
-            or benign_context
-            or not risk_keys
-        )
-    )
-    display_prob = prob
-    decision_basis = 'model'
-
-    # Manual overrides
-    if strong_phishing_combo:
-        main_label = "Phishing"
-        level = "high" if max_model_prob >= 0.75 or risk_score >= 3.4 else "medium"
-        display_prob = max(max_model_prob, threshold + 0.05)
-        decision_basis = 'high_risk_evidence_override'
-    elif (
-        prob >= threshold
-        and 'identity_verification_context' in reassurance_keys
-        and ('sender_email_present' in context_keys or bool({'sender_brand_match', 'domain_match'} & reassurance_keys))
-        and no_dangerous_cues
-        and 'domain_mismatch' not in risk_keys
-        and 'suspicious_link' not in risk_keys
-    ):
-        main_label = "Legitimate"
-        level = "review"
-        display_prob = min(
-            support_prob if support_prob is not None else threshold - 0.01,
-            max(0.0, threshold - 0.01),
-        )
-        review_recommended = False
-        decision_basis = 'identity_verification_override'
-    elif (
-        prob >= threshold
-        and trusted_service_context
-        and (support_prob is None or support_prob <= 0.90)
-    ):
-        main_label = "Legitimate"
-        level = "review"
-        display_prob = min(
-            support_prob if support_prob is not None else threshold - 0.01,
-            max(0.0, threshold - 0.01),
-        )
-        review_recommended = True
-        decision_basis = 'trusted_service_context_override'
-    elif (
-        prob >= threshold
-        and safe_routine_message
-        and bool({'sender_brand_match', 'domain_match', 'link_domain_match'} & reassurance_keys)
-        and (support_prob is None or support_prob <= 0.85)
-    ):
-        main_label = "Legitimate"
-        level = "review"
-        display_prob = min(
-            support_prob if support_prob is not None else threshold - 0.01,
-            max(0.0, threshold - 0.01),
-        )
-        decision_basis = 'benign_routine_override'
-    elif benign_model_disagreement:
-        main_label = "Legitimate"
-        level = "review"
-        display_prob = min(support_prob, max(0.0, threshold - 0.01))
-        decision_basis = 'benign_support_model_override'
-    elif prob >= threshold and near_boundary and no_dangerous_cues and risk_score <= 0 and (
-        benign_context or bool({'domain_match', 'link_domain_match'} & reassurance_keys)
-    ):
-        main_label = "Legitimate"
-        level = "review"
-        display_prob = max(0.0, threshold - 0.01)
-        decision_basis = 'hybrid_override'
-    elif (
-        prob >= threshold
-        and support_prob is not None
-        and support_prob < threshold
-        and no_dangerous_cues
-        and low_severity_only
-        and risk_count <= 1
-        and transactional_reassurance
-        and 'domain_mismatch' not in risk_keys
-        and 'suspicious_link' not in risk_keys
-    ):
-        main_label = "Legitimate"
-        level = "review"
-        display_prob = support_prob
-        decision_basis = 'transactional_override'
-    elif (
-        prob >= threshold
-        and support_prob is not None
-        and (clean_message or safe_routine_message)
-        and ('sender_email_present' in context_keys or benign_context or bool({'domain_match', 'link_domain_match'} & reassurance_keys))
-        and support_prob <= 0.40
-    ):
-        ensemble_prob = round((prob + support_prob) / 2.0, 4)
-        if ensemble_prob < threshold:
-            main_label = "Legitimate"
-            level = "review"
-            display_prob = ensemble_prob
-            decision_basis = 'cross_model_override'
-        else:
-            main_label = "Phishing"
-            level = "medium"
-    elif (
-        prob >= threshold
-        and no_dangerous_cues
-        and risk_score <= -1.0
-        and strong_benign_reassurance
-        and 'domain_mismatch' not in risk_keys
-        and 'suspicious_link' not in risk_keys
-    ):
-        main_label = "Legitimate"
-        level = "review"
-        display_prob = max(0.0, threshold - 0.01)
-        decision_basis = 'benign_notice_override'
-    elif (
-        prob >= threshold
-        and support_prob is not None
-        and no_dangerous_cues
-        and risk_score <= -0.6
-        and bool(routine_message_keys & reassurance_keys)
-        and support_prob <= max(0.55, threshold - 0.05)
-        and 'domain_mismatch' not in risk_keys
-        and 'suspicious_link' not in risk_keys
-    ):
-        main_label = "Legitimate"
-        level = "review"
-        display_prob = min(support_prob, max(0.0, threshold - 0.01))
-        decision_basis = 'routine_message_override'
-    elif prob >= threshold:
-        main_label = "Phishing"
-        level = "high" if prob >= max(0.80, threshold + 0.20) else "medium"
-    elif (
-        has_model_support
-        and support_prob >= threshold
-        and not safe_routine_message
-        and (
-            bool(dangerous_risk_keys & risk_keys)
-            or 'urgency' in risk_keys
-            or risk_score >= 1.4
-        )
-    ):
-        main_label = "Phishing"
-        level = "medium"
-        display_prob = support_prob
-        decision_basis = 'support_model_risk_override'
-    else:
-        main_label = "Legitimate"
-        level = "review" if risk_score > 0 and near_boundary else "low"
-
-    return {
-        "label": main_label,
-        "level": level,
-        "review_recommended": review_recommended,
-        "display_prob": display_prob,
-        "model_prob": prob,
-        "decision_basis": decision_basis,
-        "support_prob": support_prob,
-    }
-
-
 def build_model_input(body: str, subject: str = '', sender_email: str = '', sender_context: str = '') -> str:
     parts = []
     sender = normalize_message_text(sender_email)
@@ -540,7 +206,8 @@ def build_model_input(body: str, subject: str = '', sender_email: str = '', send
     subj = normalize_message_text(subject)
     body_text = normalize_message_text(body)
 
-    # Unified model input
+    # The models were trained on text, so sender and subject are folded into the
+    # same plain-text input rather than treated as separate model features.
     if sender_display and sender_display != sender:
         parts.append(f'Sender: {sender_display}')
     if sender:
@@ -553,18 +220,6 @@ def build_model_input(body: str, subject: str = '', sender_email: str = '', send
     return '\n\n'.join(parts)
 
 
-def render_signal_group(title: str, items, icon: str = ''):
-    if not items:
-        return
-    st.markdown(f'#### {title}')
-    for item in items:
-        prefix = f'{icon} ' if icon else ''
-        st.markdown(f"{prefix}**{item['title']}** - {item['description']}")
-        if item.get('matches'):
-            examples = [truncate_display_value(match) for match in item['matches']]
-            st.caption('Examples: ' + '; '.join(examples))
-
-
 def useful_context_items(items):
     hidden_keys = {
         'sender_email_present',
@@ -573,125 +228,258 @@ def useful_context_items(items):
     return [item for item in (items or []) if item.get('key') not in hidden_keys]
 
 
-def truncate_display_value(value: str, limit: int = 90) -> str:
-    text = re.sub(r'\s+', ' ', str(value or '')).strip()
-    if len(text) <= limit:
-        return text
-    return f'{text[:limit - 3]}...'
-
-
-def get_risk_level(label: str, probability: float, threshold: float, review_recommended: bool = False) -> str:
-    prob = float(probability)
-    boundary_gap = abs(prob - float(threshold))
-
-    if label == 'Phishing':
-        if prob >= 0.80 or boundary_gap >= 0.18:
-            return 'High'
-        return 'Medium'
-
-    if review_recommended:
-        return 'Medium'
-    if prob <= 0.25:
-        return 'Very low'
-    return 'Low'
-
-
-def result_advice(label: str, risk_level: str, probability: float, threshold: float) -> str:
-    if risk_level == 'Medium' and abs(float(probability) - float(threshold)) < 0.08:
-        return 'Borderline result. Review the message manually before clicking links or sharing details.'
-    if label == 'Phishing':
-        if risk_level == 'High':
-            return 'Do not click links or provide credentials. Verify through the official website.'
-        return 'High risk. Treat this message as suspicious.'
-    return 'Low risk, but review links before clicking.'
-
-
-def verdict_confidence(label: str, probability: float) -> float:
-    prob = float(probability)
-    return 1.0 - prob if label == 'Legitimate' else prob
-
-
-def render_result_summary(verdict: dict, risk_level: str, model_name: str, advice: str, probability: float):
-    label = verdict['label']
-    confidence = verdict_confidence(label, probability)
-    summary = (
-        f"**Verdict:** {label}\n\n"
-        f"**Risk level:** {risk_level}\n\n"
-        f"**Confidence in verdict:** {fmt_pct(confidence)}\n\n"
-        f"**Model used:** {friendly_model_name(model_name)}\n\n"
-        f"**Advice:** {advice}"
-    )
-
-    if label == 'Phishing' or risk_level == 'High':
-        st.error(summary)
-    elif risk_level == 'Medium':
-        st.warning(summary)
-    else:
-        st.success(summary)
-
-    st.progress(
-        min(max(confidence, 0.0), 1.0),
-        text=f'Confidence in verdict: {fmt_pct(confidence)}',
-    )
-
-
-def render_indicator_table(rules: dict):
-    rows = [
-        ('Urgency language', rules.get('has_urgency')),
-        ('Credential request', rules.get('has_credential_request')),
-        ('Threat language', rules.get('has_threat')),
-        ('Security notice context', rules.get('has_security_notification')),
-        ('URLs detected', rules.get('url_count', 0)),
-        ('Email addresses detected', len(rules.get('email_addresses') or [])),
-    ]
-    st.dataframe(
-        pd.DataFrame(rows, columns=['Indicator', 'Value']),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    urls = rules.get('urls') or []
-    if urls:
-        st.markdown('#### Detected URLs')
-        st.dataframe(
-            pd.DataFrame({'URL preview': [truncate_display_value(url, 100) for url in urls]}),
-            use_container_width=True,
-            hide_index=True,
-        )
-        st.code('\n'.join(urls), language='text')
-
-
-def render_explanation_sections(
-    *,
-    summary: str,
-    rules: dict,
-    risk_items: list[dict],
-    reassurance_items: list[dict],
-    context_items: list[dict],
-    expanded: bool = False,
-):
-    with st.expander('Why this result was given', expanded=expanded):
-        safe_summary = escape(summary).replace('\n', '<br>')
-        st.markdown(f"<div class='explanation-card'>{safe_summary}</div>", unsafe_allow_html=True)
-        main_reasons = risk_items or reassurance_items or context_items
-        if main_reasons:
-            st.markdown('**Main reasons**')
-            for item in main_reasons[:5]:
-                st.markdown(f"- **{item['title']}**: {item['description']}")
-        else:
-            st.info('No strong rule-based indicators were found in the visible text. The result is mostly driven by the classifier output.')
-
-    with st.expander('Detected links and indicators'):
-        render_indicator_table(rules)
-        render_signal_group('Warning signs', risk_items, '!')
-        render_signal_group('Context that lowers risk', reassurance_items, '+')
-        render_signal_group('Additional context', context_items, '')
-
-
 def inject_custom_css():
     st.markdown(
         """
         <style>
+        [data-testid="stAppViewContainer"] {
+            background:
+                radial-gradient(circle at top left, rgba(37, 99, 235, 0.10), transparent 34rem),
+                radial-gradient(circle at 85% 8%, rgba(14, 165, 233, 0.09), transparent 30rem),
+                #f7fbff;
+        }
+        [data-testid="stHeader"] {
+            background: transparent;
+        }
+        #MainMenu, [data-testid="stToolbar"], [data-testid="stDecoration"], [data-testid="stStatusWidget"] {
+            display: none !important;
+            visibility: hidden !important;
+        }
+        .block-container {
+            max-width: 1180px;
+            padding-top: 0.9rem;
+            padding-bottom: 1.25rem;
+        }
+        .announcement-bar {
+            background: linear-gradient(90deg, #0f5bd7, #0ea5e9);
+            color: #ffffff;
+            text-align: center;
+            font-weight: 750;
+            border-radius: 0 0 18px 18px;
+            padding: 0.55rem 1rem;
+            margin: -0.9rem 0 0.85rem 0;
+            box-shadow: 0 14px 34px rgba(37, 99, 235, 0.18);
+        }
+        .site-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 1rem;
+            background: rgba(255, 255, 255, 0.88);
+            border: 1px solid rgba(148, 163, 184, 0.24);
+            border-radius: 22px;
+            padding: 0.82rem 1rem;
+            margin-bottom: 0.8rem;
+            box-shadow: 0 18px 44px rgba(15, 23, 42, 0.07);
+        }
+        .brand-lockup {
+            display: flex;
+            align-items: center;
+            gap: 0.78rem;
+        }
+        .brand-mark {
+            width: 46px;
+            height: 46px;
+            border-radius: 15px;
+            background: linear-gradient(135deg, #052e73, #1d74f5);
+            color: #ffffff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.05rem;
+            font-weight: 850;
+            letter-spacing: -0.04em;
+            box-shadow: 0 10px 24px rgba(29, 116, 245, 0.27);
+        }
+        .brand-name {
+            color: #0b2545;
+            font-size: 1.1rem;
+            font-weight: 850;
+            line-height: 1.05;
+        }
+        .brand-subtitle {
+            color: #2563eb;
+            font-size: 0.72rem;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            margin-top: 0.12rem;
+        }
+        .site-meta {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 0.55rem;
+            color: #475569;
+            font-size: 0.86rem;
+            font-weight: 700;
+            flex-wrap: wrap;
+        }
+        .site-meta span {
+            border: 1px solid rgba(148, 163, 184, 0.28);
+            background: rgba(248, 250, 252, 0.86);
+            padding: 0.42rem 0.7rem;
+            border-radius: 999px;
+        }
+        .hero-shell {
+            position: relative;
+            overflow: hidden;
+            border-radius: 30px;
+            padding: 2.35rem 2.15rem 1.65rem 2.15rem;
+            background:
+                linear-gradient(135deg, rgba(255, 255, 255, 0.96), rgba(238, 247, 255, 0.97)),
+                radial-gradient(circle at 88% 8%, rgba(37, 99, 235, 0.18), transparent 25rem);
+            border: 1px solid rgba(148, 163, 184, 0.24);
+            box-shadow: 0 26px 70px rgba(15, 23, 42, 0.09);
+            margin-bottom: 1rem;
+        }
+        .hero-shell::after {
+            content: "";
+            position: absolute;
+            right: -7rem;
+            top: -8rem;
+            width: 20rem;
+            height: 20rem;
+            border-radius: 999px;
+            background: linear-gradient(135deg, rgba(37, 99, 235, 0.16), rgba(14, 165, 233, 0.08));
+        }
+        .hero-content {
+            position: relative;
+            z-index: 2;
+            max-width: 850px;
+            margin: 0 auto;
+            text-align: center;
+        }
+        .hero-kicker {
+            display: inline-flex;
+            border-radius: 999px;
+            padding: 0.45rem 0.82rem;
+            background: #dffcf2;
+            color: #047857;
+            font-weight: 800;
+            font-size: 0.84rem;
+            margin-bottom: 0.75rem;
+        }
+        .hero-title {
+            color: #07264f;
+            font-size: clamp(2.15rem, 4vw, 4rem);
+            line-height: 1.05;
+            font-weight: 850;
+            letter-spacing: -0.055em;
+            margin: 0;
+        }
+        .hero-copy {
+            color: #4b617c;
+            font-size: 1.05rem;
+            line-height: 1.62;
+            max-width: 760px;
+            margin: 0.95rem auto 1.35rem auto;
+        }
+        .hero-actions {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 1rem;
+            flex-wrap: wrap;
+            margin-bottom: 1.35rem;
+        }
+        .primary-cta {
+            display: inline-block;
+            background: #1d74f5;
+            color: #ffffff !important;
+            text-decoration: none !important;
+            font-weight: 850;
+            min-width: min(430px, 82vw);
+            text-align: center;
+            padding: 1.05rem 3.3rem;
+            border-radius: 16px;
+            box-shadow: 0 16px 34px rgba(29, 116, 245, 0.25);
+        }
+        .primary-cta:hover {
+            background: #0f5bd7;
+            color: #ffffff !important;
+            text-decoration: none !important;
+        }
+        .feature-row {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 1rem;
+            margin-top: 0.95rem;
+        }
+        .feature-card {
+            background: rgba(255, 255, 255, 0.86);
+            border: 1px solid rgba(148, 163, 184, 0.22);
+            border-radius: 18px;
+            padding: 0.86rem;
+            text-align: left;
+            min-height: 98px;
+            box-shadow: 0 12px 30px rgba(15, 23, 42, 0.045);
+        }
+        .feature-card.active {
+            border-color: rgba(37, 99, 235, 0.45);
+            box-shadow: 0 16px 34px rgba(37, 99, 235, 0.12);
+        }
+        .feature-card strong {
+            color: #0b2545;
+            display: block;
+            font-size: 0.98rem;
+            margin-bottom: 0.45rem;
+        }
+        .feature-card span {
+            color: #64748b;
+            font-size: 0.86rem;
+            line-height: 1.55;
+        }
+        div[data-baseweb="tab-list"] {
+            display: grid !important;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            background: rgba(255, 255, 255, 0.80);
+            border: 1px solid rgba(148, 163, 184, 0.22);
+            border-radius: 16px;
+            padding: 0.34rem;
+            margin-bottom: 0.7rem;
+            box-shadow: 0 10px 26px rgba(15, 23, 42, 0.045);
+        }
+        button[data-baseweb="tab"] {
+            width: 100%;
+            border-radius: 12px !important;
+            font-weight: 750;
+            justify-content: center;
+            padding: 0.72rem 0.85rem;
+        }
+        button[data-baseweb="tab"][aria-selected="true"] {
+            background: #eff6ff;
+            color: #1d4ed8;
+        }
+        div[data-baseweb="tab-highlight"] {
+            background-color: #2563eb !important;
+        }
+        button[data-baseweb="tab"][aria-selected="true"] * {
+            color: #1d4ed8 !important;
+        }
+        div[data-testid="stToggle"] button[role="switch"][aria-checked="true"],
+        div[data-testid="stToggle"] div[role="switch"][aria-checked="true"],
+        div[data-testid="stToggle"] input:checked + div {
+            background-color: #2563eb !important;
+            border-color: #2563eb !important;
+        }
+        div[data-testid="stToggle"] button[role="switch"]:focus,
+        div[data-testid="stToggle"] div[role="switch"]:focus {
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.16) !important;
+        }
+        div[data-testid="stToggle"] [style*="rgb(255, 75, 75)"],
+        div[data-testid="stSlider"] [style*="rgb(255, 75, 75)"],
+        div[data-testid="stToggle"] [style*="#ff4b4b"],
+        div[data-testid="stSlider"] [style*="#ff4b4b"] {
+            background-color: #2563eb !important;
+            border-color: #2563eb !important;
+            color: #2563eb !important;
+        }
+        div[data-testid="stSlider"] [role="slider"] {
+            background-color: #2563eb !important;
+            border-color: #2563eb !important;
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12) !important;
+        }
         .result-card {
             border: 1px solid rgba(49, 51, 63, 0.15);
             border-radius: 16px;
@@ -716,10 +504,10 @@ def inject_custom_css():
             margin-bottom: 1rem;
         }
         .page-heading {
-            font-size: 2.25rem;
+            font-size: 2.15rem;
             font-weight: 700;
             line-height: 1.15;
-            margin: 1.45rem 0 0.75rem 0;
+            margin: 1.05rem 0 0.55rem 0;
         }
         div.stButton > button[kind="primary"] {
             background-color: #2563eb;
@@ -734,6 +522,36 @@ def inject_custom_css():
         .small-note {
             color: #6b7280;
             font-size: 0.92rem;
+        }
+        .empty-results-card {
+            background: linear-gradient(135deg, rgba(239, 246, 255, 0.95), rgba(255, 255, 255, 0.96));
+            border: 1px solid rgba(96, 165, 250, 0.28);
+            border-radius: 18px;
+            padding: 1.05rem 1.15rem;
+            box-shadow: 0 14px 34px rgba(15, 23, 42, 0.055);
+        }
+        .empty-results-title {
+            color: #0b2545;
+            font-weight: 850;
+            font-size: 1.05rem;
+            margin-bottom: 0.35rem;
+        }
+        .empty-results-text {
+            color: #4b617c;
+            line-height: 1.55;
+        }
+        div[data-baseweb="input"] > div,
+        div[data-baseweb="textarea"] textarea,
+        div[data-baseweb="select"] > div {
+            background: #ffffff !important;
+            border: 1px solid rgba(100, 116, 139, 0.35) !important;
+            box-shadow: inset 0 1px 0 rgba(15, 23, 42, 0.025);
+        }
+        div[data-baseweb="input"] > div:focus-within,
+        div[data-baseweb="textarea"] textarea:focus,
+        div[data-baseweb="select"] > div:focus-within {
+            border-color: rgba(37, 99, 235, 0.58) !important;
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.10);
         }
         .big-table table {
             width: 100%;
@@ -752,7 +570,67 @@ def inject_custom_css():
             border-bottom: 1px solid #ddd;
         }
         section[data-testid="stSidebar"] > div:first-child {
-            padding-top: 3.55rem;
+            padding-top: 3rem;
+            background:
+                radial-gradient(circle at top left, rgba(37, 99, 235, 0.14), transparent 18rem),
+                linear-gradient(180deg, rgba(239, 246, 255, 0.96), rgba(247, 251, 255, 0.96));
+            border-right: 1px solid rgba(96, 165, 250, 0.24);
+            box-shadow: 10px 0 30px rgba(15, 23, 42, 0.045);
+        }
+        section[data-testid="stSidebar"] {
+            width: 268px !important;
+        }
+        section[data-testid="stSidebar"] h1,
+        section[data-testid="stSidebar"] h2,
+        section[data-testid="stSidebar"] h3,
+        section[data-testid="stSidebar"] h4 {
+            color: #0b2545;
+        }
+        section[data-testid="stSidebar"] hr {
+            border-color: rgba(96, 165, 250, 0.26);
+        }
+        .site-footer {
+            margin-top: 1.35rem;
+            background: #111827;
+            color: #e5e7eb;
+            border-radius: 26px 26px 0 0;
+            padding: 1.45rem 1.6rem;
+        }
+        .footer-grid {
+            display: grid;
+            grid-template-columns: 1.4fr 1fr 1fr 1fr;
+                gap: 1.2rem;
+        }
+        .footer-title {
+            color: #ffffff;
+            font-size: 1.08rem;
+            font-weight: 850;
+            margin-bottom: 0.65rem;
+        }
+        .footer-text, .footer-link {
+            color: #cbd5e1;
+            font-size: 0.9rem;
+            line-height: 1.65;
+            margin-bottom: 0.38rem;
+        }
+        .footer-link {
+            display: block;
+            text-decoration: none;
+        }
+        @media (max-width: 900px) {
+            .site-header {
+                align-items: flex-start;
+                flex-direction: column;
+            }
+            .site-meta {
+                justify-content: flex-start;
+            }
+            .hero-shell {
+                padding: 2.2rem 1.25rem 1.35rem 1.25rem;
+            }
+            .feature-row, .footer-grid {
+                grid-template-columns: 1fr;
+            }
         }
         </style>
         """,
@@ -761,34 +639,141 @@ def inject_custom_css():
 
 
 def render_page_heading(title: str):
-    st.markdown(f"<h1 class='page-heading'>{escape(title)}</h1>", unsafe_allow_html=True)
+    slug = title.lower().replace(' ', '-')
+    st.markdown(f"<h1 id='{escape(slug)}' class='page-heading'>{escape(title)}</h1>", unsafe_allow_html=True)
+
+
+def render_site_header():
+    # Header and feature chips make the Streamlit prototype feel more like a small web app.
+    st.markdown(
+        """
+        <div class="announcement-bar">
+            Explainable phishing email detection application for safer message review
+        </div>
+        <div class="site-header">
+            <div class="brand-lockup">
+                <div class="brand-mark">VX</div>
+                <div>
+                    <div class="brand-name">Veridexia</div>
+                    <div class="brand-subtitle">ML Phishing Detection</div>
+                </div>
+            </div>
+            <div class="site-meta">
+                <span>Email scanner</span>
+                <span>Gmail import</span>
+                <span>Evidence explanations</span>
+                <span>Decision support</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_hero():
+    # Landing hero summarises the app before the user reaches the scan form.
+    st.markdown(
+        """
+        <section class="hero-shell">
+            <div class="hero-content">
+                <div class="hero-kicker">Explainable email threat checking</div>
+                <h1 class="hero-title">Scan emails for phishing signals before you click.</h1>
+                <p class="hero-copy">
+                    Veridexia analyzes sender, subject and email content with a DistilBERT classifier
+                    and evidence-supported signals, then explains why a message looks safe, suspicious or high risk.
+                </p>
+                <div class="hero-actions">
+                    <a class="primary-cta" href="#scan-email">Start scanning</a>
+                </div>
+                <div class="feature-row">
+                    <div class="feature-card">
+                        <strong>Email scanner</strong>
+                        <span>Paste email text or import messages locally from Gmail for analysis.</span>
+                    </div>
+                    <div class="feature-card">
+                        <strong>ML classification</strong>
+                        <span>DistilBERT is the main model, with a baseline available in advanced mode.</span>
+                    </div>
+                    <div class="feature-card">
+                        <strong>Evidence layer</strong>
+                        <span>Highlights urgency, credential requests, links, sender patterns, and reassurance cues.</span>
+                    </div>
+                    <div class="feature-card">
+                        <strong>Decision support</strong>
+                        <span>Designed to support user judgement, not replace careful review.</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_site_footer():
+    # Footer reinforces the safety framing: this is decision support, not a guaranteed defence.
+    st.markdown(
+        """
+        <footer class="site-footer">
+            <div class="footer-grid">
+                <div>
+                    <div class="footer-title">Veridexia</div>
+                    <div class="footer-text">
+                        A web application for explainable phishing email detection.
+                        Results should be treated as decision support rather than guaranteed protection.
+                    </div>
+                </div>
+                <div>
+                    <div class="footer-title">Features</div>
+                    <span class="footer-link">Email scanning</span>
+                    <span class="footer-link">Gmail import</span>
+                    <span class="footer-link">Evidence explanations</span>
+                </div>
+                <div>
+                    <div class="footer-title">Technology</div>
+                    <span class="footer-link">Python and Streamlit</span>
+                    <span class="footer-link">DistilBERT and baseline ML</span>
+                    <span class="footer-link">Risk signal detection</span>
+                </div>
+                <div>
+                    <div class="footer-title">Safety</div>
+                    <span class="footer-link">Do not share passwords</span>
+                    <span class="footer-link">Verify through official websites</span>
+                    <span class="footer-link">Review uncertain results manually</span>
+                </div>
+            </div>
+        </footer>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 @st.cache_resource(show_spinner=False)
 def get_baseline_predictor():
-    # Load once per session
+    # Load once per session so repeated scans are fast.
     return BaselinePredictor()
 
 
 @st.cache_resource(show_spinner=False)
 def get_distilbert_predictor():
-    # Load once per session
+    # DistilBERT is heavier, so caching avoids reloading the transformer every scan.
     if not distilbert_assets_available():
-        raise RuntimeError('DistilBERT weights are not available in this deployment.')
+        raise RuntimeError('DistilBERT weights are not available in this local copy.')
     from src.inference.distilbert import DistilBertPredictor
     return DistilBertPredictor()
 
 
 st.set_page_config(page_title='Veridexia', layout='wide')
 inject_custom_css()
-st.title('Veridexia: ML-Based Phishing Detection')
+render_site_header()
+render_hero()
 
-# Available runtime features
+# Available runtime features depend on local model and OAuth files.
 model_choices = available_model_choices()
 distilbert_enabled = 'distilbert' in model_choices
 gmail_enabled = GOOGLE_CREDENTIALS.exists()
 
-# Session state defaults
+# Session state keeps the form, Gmail previews and recent scans alive across Streamlit reruns.
 if 'model_choice' not in st.session_state:
     st.session_state.model_choice = 'distilbert' if distilbert_enabled else 'baseline'
 if 'threshold' not in st.session_state:
@@ -832,7 +817,7 @@ if st.session_state.model_choice not in model_choices:
     st.session_state.model_choice = model_choices[0]
 
 with st.sidebar:
-    # Global controls
+    # Global controls. Baseline is kept in Advanced mode because DistilBERT is the main model.
     st.markdown('# Settings')
     st.session_state.advanced_mode = st.toggle(
         'Advanced mode',
@@ -845,13 +830,14 @@ with st.sidebar:
             'Model',
             model_choices,
             index=model_choices.index(st.session_state.model_choice),
+            format_func=friendly_model_name,
             help="Choose which classifier makes the prediction. DistilBERT is the project's main transformer-based model, while the baseline remains available for comparison.",
         )
     else:
         st.session_state.model_choice = 'distilbert' if distilbert_enabled else 'baseline'
 
     if not distilbert_enabled:
-        st.caption('This deployment is using the baseline model for live predictions because the DistilBERT weights are not bundled here.')
+        st.caption('This local copy is using the baseline model because the DistilBERT weights are not available.')
 
     if st.session_state.advanced_mode:
         st.markdown('#### Detection sensitivity')
@@ -875,15 +861,17 @@ with st.sidebar:
     st.caption('Detailed evidence appears inside the result expanders after each scan.')
 
 
+st.markdown("<div id='app-tabs'></div>", unsafe_allow_html=True)
+
 # Main app tabs
 tab_scan, tab_activity, tab_about, tab_guide = st.tabs(
     ['Scan Email', 'Recent Activity', 'About', 'Guide']
 )
 
 with tab_scan:
-    # Main scan workflow
+    # Main scan workflow to collect input, run the selected model, then explain the result.
     render_page_heading('Scan Email')
-    st.caption('Paste the body of an email or upload exported emails or text documents. The classifier uses any extracted text together with the sender email and subject when available.')
+    st.caption('Paste the body of an email or import a recent Gmail message. The classifier uses the email content together with the sender email and subject when available.')
 
     left, right = st.columns([1.15, 1])
 
@@ -906,6 +894,7 @@ with tab_scan:
                 import_gmail = st.button('Import recent emails', type='primary', use_container_width=True)
 
             if import_gmail:
+                # First import only fetches previews/metadata so the app stays responsive.
                 with st.spinner('Importing recent Gmail previews...'):
                     gmail_result = import_recent_gmail_messages(
                         GOOGLE_CREDENTIALS,
@@ -962,6 +951,7 @@ with tab_scan:
             if st.button('Load selected email', type='primary', use_container_width=True):
                 selected_message = st.session_state.gmail_messages[st.session_state.gmail_selected_index]
                 if not selected_message.get('body_loaded'):
+                    # Load the full body only when the user chooses a message to analyse.
                     with st.spinner('Loading selected email...'):
                         full_message, load_warnings = load_gmail_message_body(
                             GOOGLE_CREDENTIALS,
@@ -986,38 +976,7 @@ with tab_scan:
         st.markdown('**Subject**')
         subject_line = st.text_input('Subject', key='scan_subject', label_visibility='collapsed')
         st.markdown('**Email Content**')
-        email_text = st.text_area('Email Content', height=280, key='scan_email_text', label_visibility='collapsed')
-        st.markdown('**Upload exported emails or text documents**')
-        uploaded_files = st.file_uploader(
-            'Upload exported emails or text documents',
-            type=[
-                'txt', 'text', 'md', 'rst', 'log', 'csv', 'tsv', 'json',
-                'yaml', 'yml', 'ini', 'cfg', 'xml', 'html', 'htm',
-                'docx', 'pdf', 'eml',
-            ],
-            accept_multiple_files=True,
-            label_visibility='collapsed',
-            help='Use exported .eml files or previously saved text-based documents. Screenshots and images are not supported.',
-        )
-        upload_context = build_upload_context(uploaded_files)
-        st.caption('Safety note: avoid downloading or opening unknown live attachments.')
-
-        if upload_context.items:
-            st.caption(f'Loaded {len(upload_context.items)} uploaded file(s) for analysis.')
-            for item in upload_context.items:
-                extraction_mode = item.kind.upper()
-                if item.text:
-                    st.caption(f'{item.filename}: {extraction_mode} text extracted')
-                else:
-                    st.caption(f'{item.filename}: uploaded, but no readable text extracted yet')
-
-        if upload_context.subject and not subject_line.strip():
-            st.caption(f"Detected subject from upload: {upload_context.subject}")
-        if upload_context.sender_email and not sender_email.strip():
-            st.caption(f"Detected sender from upload: {upload_context.sender_email}")
-
-        for warning in upload_context.warnings:
-            st.info(warning)
+        email_text = st.text_area('Email Content', height=220, key='scan_email_text', label_visibility='collapsed')
 
         run = st.button('Analyze', type='primary', use_container_width=True)
 
@@ -1026,9 +985,10 @@ with tab_scan:
         st.subheader('Results')
 
         if run:
+            # Normalise and combine all visible user input before model inference.
             model_choice = st.session_state.model_choice
             threshold = float(st.session_state.threshold)
-            effective_sender = (sender_email or '').strip() or upload_context.sender_email
+            effective_sender = (sender_email or '').strip()
             effective_sender_context = (
                 st.session_state.scan_sender_context.strip()
                 if isinstance(st.session_state.scan_sender_context, str)
@@ -1036,10 +996,8 @@ with tab_scan:
             )
             if effective_sender and effective_sender_context and effective_sender not in effective_sender_context:
                 effective_sender_context = f'{effective_sender_context} <{effective_sender}>'
-            effective_subject = (subject_line or '').strip() or upload_context.subject
-            combined_body = '\n\n'.join(
-                part for part in [email_text.strip(), upload_context.body_text] if part
-            ).strip()
+            effective_subject = (subject_line or '').strip()
+            combined_body = email_text.strip()
             combined_body = normalize_message_text(combined_body)
             effective_sender = normalize_message_text(effective_sender)
             effective_subject = normalize_message_text(effective_subject)
@@ -1050,20 +1008,20 @@ with tab_scan:
                 sender_context=effective_sender_context,
             )
             if not model_input.strip():
-                st.warning('Paste some email content or upload a file with readable text first.')
+                st.warning('Paste some email content or import a Gmail message first.')
                 st.stop()
 
             with st.spinner(f'Analysing email with {friendly_model_name(model_choice)}...'):
                 start = time.time()
 
                 if model_choice == 'baseline':
-                    # Baseline path
+                    # Baseline path: fast TF-IDF + Logistic Regression prediction.
                     predictor = get_baseline_predictor()
                     result = predictor.predict(model_input, threshold=threshold)
                     evidence = baseline_evidence(model_input, predictor)
                     support_result = None
                 else:
-                    # DistilBERT + baseline support
+                    # DistilBERT path: main transformer prediction plus baseline as a support check.
                     predictor = get_distilbert_predictor()
                     result = predictor.predict(model_input, threshold=threshold)
                     evidence = None
@@ -1111,6 +1069,7 @@ with tab_scan:
             )
 
             history_entry = {
+                # Store only the small result snapshot needed for Recent Activity.
                 'model': result.model_name,
                 'threshold': float(threshold),
                 'display_verdict': verdict['label'],
@@ -1133,8 +1092,18 @@ with tab_scan:
                 [history_entry, *st.session_state.recent_activity]
             )
         else:
-            st.markdown("<p class='small-note'>The result card, explanation, and user-friendly signals will appear here after analysis.</p>", unsafe_allow_html=True)
-            st.info('Example output: Likely phishing / Suspicious - review recommended / Likely legitimate')
+            st.markdown(
+                """
+                <div class="empty-results-card">
+                    <div class="empty-results-title">Ready to scan</div>
+                    <div class="empty-results-text">
+                        Scan results will appear here, including the classification, risk level,
+                        confidence score, and explanation.
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
 with tab_activity:
     render_page_heading('Recent Activity')
@@ -1152,6 +1121,7 @@ with tab_activity:
         st.info('No emails have been scanned yet. Use the Scan Email tab to analyze a message.')
     else:
         for item in history:
+            # Recent Activity is session-only; it is not written to a database.
             verdict = item.get('display_verdict', 'Unknown')
             sender = item.get('sender_email') or 'Unknown sender'
             subject = item.get('subject') or '(no subject)'
@@ -1187,7 +1157,6 @@ with tab_activity:
 
                         if warning_signals or reassurance_signals or context_signals:
                             render_signal_group('Warning signs', warning_signals, '!')
-                            render_signal_group('Context that lowers risk', reassurance_signals, '+')
                             render_signal_group('Additional context', context_signals, '')
                     else:
                         st.info('This scan was saved before explanation snapshots were added to Recent Activity.')
@@ -1251,8 +1220,8 @@ with tab_guide:
     st.markdown('### Supported inputs')
     st.markdown(
         """
-        You can paste email text directly, import from Gmail, or upload readable files such as
-        `.eml`, `.txt`, `.docx`, or `.pdf`.
+        You can paste email text directly or import recent messages from Gmail. For the clearest result,
+        include the sender, subject, and full email body where possible.
         """
     )
 
@@ -1262,6 +1231,7 @@ with tab_guide:
         """
         Always read the explanation as well as the final phishing or legitimate label.
         Some legitimate emails, such as newsletters, job alerts, and account notices, may still trigger warning signs.
+        The system supports decision-making but cannot guarantee that every phishing email will be detected.
         """
     )
     st.info('Review recommended means the email contains signals that should be checked manually.')
@@ -1277,6 +1247,6 @@ with tab_guide:
 
     st.divider()
     st.markdown('### Safety note')
-    st.warning('Do not download or open unknown live attachments just to analyse them in the demo.')
+    st.warning('Do not click links or share account details until the message has been checked through an official website or trusted contact channel.')
 
-
+render_site_footer()

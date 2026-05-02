@@ -9,12 +9,15 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 
 
+# Read-only scope follows least privilege: the app can read selected inbox messages
+# but cannot send, delete, or modify Gmail content.
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 MAX_EMAIL_BODY = 12000
 
 
 @dataclass
 class GmailMessage:
+    # Small, serialisable object that can be stored safely in Streamlit session state.
     message_id: str
     subject: str = ''
     sender_email: str = ''
@@ -69,6 +72,8 @@ def _clean_text(text: str, *, limit: int = MAX_EMAIL_BODY) -> str:
 
 
 def _extract_text_from_payload(payload: dict | None) -> str:
+    # Gmail messages can be nested MIME trees, so this walks every part and
+    # collects readable plain-text/HTML content.
     if not payload:
         return ''
 
@@ -161,6 +166,8 @@ def _load_gmail_dependencies():
 
 
 def _get_gmail_service(credentials_path: Path, token_path: Path):
+    # Handles the local OAuth flow and refreshes token.json when possible.
+    # The user's Google password is handled by Google, not by this app.
     warnings: list[str] = []
     try:
         Request, Credentials, InstalledAppFlow, build = _load_gmail_dependencies()
@@ -200,6 +207,7 @@ def _get_gmail_service(credentials_path: Path, token_path: Path):
 
 
 def _fetch_message_previews(service, message_ids: list[str]):
+    # Preview import uses Gmail metadata only so the inbox list loads faster.
     previews: dict[int, GmailMessage] = {}
     warnings: list[str] = []
 
@@ -239,6 +247,7 @@ def import_recent_gmail_messages(
     *,
     max_results: int = 10,
 ) -> GmailImportResult:
+    # Public entry point used by the Streamlit app to fetch recent inbox previews.
     result = GmailImportResult()
 
     service, warnings = _get_gmail_service(credentials_path, token_path)
@@ -274,6 +283,7 @@ def load_gmail_message_body(
     token_path: Path,
     message_id: str,
 ):
+    # Full message bodies are loaded on demand after the user selects a preview.
     service, warnings = _get_gmail_service(credentials_path, token_path)
     if service is None:
         return None, warnings

@@ -23,6 +23,7 @@ def _confidence_band(prob_phishing: float, threshold: float) -> str:
 
 
 def generate_explanation(result, evidence=None, rule_evidence=None, display_label: str | None = None, display_prob: float | None = None):
+    # Converts model and rule evidence into a short explanation a non-technical user can read.
     prob = float(result.prob_phishing if display_prob is None else display_prob)
     threshold = float(result.threshold)
     confidence = _confidence_band(prob, threshold)

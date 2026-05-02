@@ -20,7 +20,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-# Paths
+# Training artefact paths
 TOK_DIR = Path("data/processed/tokenized")
 MODEL_DIR = Path("models/distilbert")
 STATS_FILE = Path("data/processed/dataset_stats.json")
@@ -42,6 +42,7 @@ print(f"  - Test:  {stats['dataset_info']['test_samples']:,} samples")
 print(f"  - Class distribution: {stats['class_distribution']['legitimate_ratio']:.1%} legitimate, {stats['class_distribution']['phishing_ratio']:.1%} phishing")
 
 # ===== LOAD TOKENIZED DATASETS =====
+# These tokenized datasets come from prepare_dataset.py, keeping training reproducible.
 print("\n[2] Loading tokenized datasets...")
 train_dataset = load_from_disk(str(TOK_DIR / "train"))
 val_dataset = load_from_disk(str(TOK_DIR / "val"))
@@ -106,7 +107,7 @@ print(f"  - Trainable parameters: {sum(p.numel() for p in model.parameters() if 
 
 # ===== DEFINE METRICS =====
 def compute_metrics(eval_pred):
-    """Compute metrics for evaluation"""
+    """Compute the phishing-focused metrics reported in the evaluation chapter."""
     logits, labels = eval_pred
     predictions = np.argmax(logits, axis=-1)
     
@@ -135,6 +136,7 @@ def compute_metrics(eval_pred):
     }
 
 # ===== TRAINING ARGUMENTS =====
+# The effective batch size is 16 because gradient accumulation combines two batches of 8.
 print("\n[5] Setting up training configuration...")
 
 training_args = TrainingArguments(
@@ -322,4 +324,4 @@ print(f"  - Model: {MODEL_DIR / 'final_model'}")
 print(f"  - Metrics: {MODEL_DIR / 'metrics.json'}")
 print(f"  - Confusion matrix: {MODEL_DIR / 'confusion_matrix.png'}")
 
-print("\n Ready for baseline comparison and deployment!")
+print("\n Ready for baseline comparison and app use!")

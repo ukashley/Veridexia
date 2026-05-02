@@ -1,7 +1,8 @@
 """
-Trains a classical ML baseline (TF-IDF + Logistic Regression) for comparisonwith the DistilBERT model. 
-This demonstrates understanding of model evaluation
-and provides a performance benchmark.
+Train the classical baseline model: TF-IDF + Logistic Regression.
+
+This gives the project a fast, interpretable benchmark to compare against
+the heavier DistilBERT model.
 """
 
 import pandas as pd
@@ -23,7 +24,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import time
 
-# Paths
+# Training artefact paths
 PROC_DIR = Path("data/processed")
 MODEL_DIR = Path("models/baseline")
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -32,7 +33,7 @@ print("="*70)
 print("BASELINE MODEL TRAINING - TF-IDF + LOGISTIC REGRESSION")
 print("="*70)
 
-# To Load Processed Data
+# Load the cleaned splits created by prepare_dataset.py.
 print("\n[1] Loading processed data...")
 train_df = pd.read_csv(PROC_DIR / "train.csv")
 val_df = pd.read_csv(PROC_DIR / "val.csv")
@@ -53,7 +54,7 @@ print(f"\n  Class distribution (test set):")
 print(f"  - Legitimate: {(test_df['label']==0).sum():,} ({(test_df['label']==0).mean():.1%})")
 print(f"  - Phishing:   {(test_df['label']==1).sum():,} ({(test_df['label']==1).mean():.1%})")
 
-# TF-IDF VECTORIZATION
+# TF-IDF turns text into sparse numerical features for Logistic Regression.
 print("\n[2] Creating TF-IDF features...")
 print("  (This extracts word frequency features from text)")
 
@@ -89,7 +90,7 @@ feature_names = tfidf.get_feature_names_out()
 print(f"\n  Sample features (top 20):")
 print(f"  {', '.join(feature_names[:20])}")
 
-# TRAIN LOGISTIC REGRESSION 
+# Train Logistic Regression on the TF-IDF representation.
 print("\n[3] Training Logistic Regression...")
 print("  (Using class weights to handle imbalance)")
 
@@ -113,7 +114,7 @@ print(f"[OK] Training complete ({train_time:.2f}s)")
 print(f"  - Converged: {clf.n_iter_[0] < clf.max_iter}")
 print(f"  - Iterations: {clf.n_iter_[0]}")
 
-# EVALUATE ON TEST SET 
+# Evaluate on the held-out internal Kaggle test split.
 print("\n[4] Evaluating on test set...")
 
 # Predictions
@@ -230,7 +231,7 @@ plt.tight_layout()
 plt.savefig(MODEL_DIR / "feature_importance.png", dpi=300, bbox_inches='tight')
 print(f"[OK] Feature importance saved to {MODEL_DIR / 'feature_importance.png'}")
 
-# SAVE MODEL AND METRICS 
+# Save everything the app/report need: model, vectorizer, plots, and metrics.
 print("\n[8] Saving model and metrics...")
 
 # Save the fitted artefacts separately so the app can load them quickly at runtime.

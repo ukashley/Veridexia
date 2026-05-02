@@ -1,4 +1,4 @@
-"""Placeholder for future DistilBERT token-level attribution.
+"""Future extension for DistilBERT token-level attribution.
 
 The current application explains DistilBERT predictions using the model
 probability, rule-based evidence, and optional baseline support evidence.

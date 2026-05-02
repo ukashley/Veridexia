@@ -4,6 +4,8 @@ import numpy as np
 from .common import PredictionResult
 
 class BaselinePredictor:
+    # Loads the saved TF-IDF vectorizer and Logistic Regression model used as
+    # the lightweight comparison model.
     def __init__(self,
                  model_path=Path("models/baseline/model.pkl"),
                  vec_path=Path("models/baseline/vectorizer.pkl")):
@@ -13,6 +15,7 @@ class BaselinePredictor:
         self.model = joblib.load(model_path)
 
     def predict(self, text: str, threshold: float = 0.5) -> PredictionResult:
+        # Convert the email into TF-IDF features, then read the phishing class probability.
         X = self.vectorizer.transform([text])
         prob = float(self.model.predict_proba(X)[0][1])
         label = int(prob >= threshold)

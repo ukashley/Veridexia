@@ -10,10 +10,11 @@ OUT_PATH = Path("data/processed/trec06_processed.csv")
 
 df = pd.read_csv(IN_PATH, engine="python")
 
-# Drop rows with no label
+# Drop rows with no label because external evaluation needs known ground truth.
 df = df.dropna(subset=["label"]).copy()
 df["label"] = df["label"].astype(int)
 
+# Match the internal model input shape by combining subject and body into one text field.
 df["text"] = (df["subject"].fillna("") + " " + df["body"].fillna("")).astype(str)
 
 # Strip the export back to the two fields the evaluators actually need.

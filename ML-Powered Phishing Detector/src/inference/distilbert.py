@@ -4,6 +4,7 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from .common import PredictionResult
 
 class DistilBertPredictor:
+    # Loads the fine-tuned transformer model used as the main classifier.
     def __init__(self, model_dir=Path("models/distilbert/final_model")):
         self.model_dir = model_dir
         self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
@@ -21,6 +22,7 @@ class DistilBertPredictor:
             logits = self.model(**enc).logits
             prob = torch.softmax(logits, dim=1)[0, 1].item()
 
+        # Thresholding is done outside the model so the UI can expose sensitivity settings.
         label = int(prob >= threshold)
         return PredictionResult(label=label, prob_phishing=float(prob),
                                 model_name="distilbert",
