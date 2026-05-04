@@ -6,6 +6,8 @@ from urllib.parse import urlparse
 
 # This file is the evidence layer, not a replacement classifier.
 # It extracts readable warning and reassurance signals so the app can explain model outputs.
+
+# Translation table for stripping invisible Unicode characters from text.
 INVISIBLE_TRANSLATION = str.maketrans('', '', '\u200b\u200c\u200d\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\ufeff')
 URL_RE = re.compile(r'hxxps?://\S+|https?://\S+|www\.\S+', re.I)
 EMAIL_RE = re.compile(r'\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b', re.I)
@@ -30,6 +32,14 @@ SECURITY_NOTIFICATION_PATTERNS = [
     r'\bwe will never ask for your password\b',
     r'\bwe will never ask you to reply by email with your (password|card number|bank details?)\b',
     r'\bwe will never ask (?:you )?for (?:your )?(password|card number|bank details?)\b',
+]
+
+ACCOUNT_ACCESS_NOTIFICATION_PATTERNS = [
+    r'\bthis email is for information only\b',
+    r'\byour [a-z0-9 ._-]{1,50} account was accessed\b',
+    r'\bif you did not access your [a-z0-9 ._-]{1,50} account\b',
+    r'\bcontact your (?:healthcare provider|provider|support team|administrator)\b',
+    r'\bdo not reply to this email\b',
 ]
 
 IN_APP_SECURITY_INSTRUCTION_PATTERNS = [
@@ -390,6 +400,17 @@ def rule_based_evidence(text: str, sender_email: str = "", subject: str = ""):
             'The wording looks more like a password-change notice or security alert than a direct request to hand over credentials.',
             -1.8,
             security_hits,
+            'reassurance',
+        ))
+
+    access_notification_hits = _find_matches(ACCOUNT_ACCESS_NOTIFICATION_PATTERNS, combined_l)
+    if access_notification_hits:
+        reassurance_signals.append(_signal(
+            'account_access_notification',
+            'Account access notification',
+            'The message reads like a routine account-access notification and does not ask for credentials by email.',
+            -1.6,
+            access_notification_hits,
             'reassurance',
         ))
 

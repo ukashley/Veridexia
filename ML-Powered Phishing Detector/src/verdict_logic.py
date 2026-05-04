@@ -77,6 +77,7 @@ def compute_user_verdict(result, rules: dict, support_result=None):
         'job_alert_context',
         'identity_verification_context',
         'security_notification',
+        'account_access_notification',
         'formal_service_message',
     }
     trusted_service_keys = {
@@ -128,6 +129,16 @@ def compute_user_verdict(result, rules: dict, support_result=None):
         and 'suspicious_link' not in risk_keys
         and 'suspicious_sender_domain' not in risk_keys
         and risk_score <= 0.5
+    )
+    account_access_notice = (
+        'account_access_notification' in reassurance_keys
+        and no_dangerous_cues
+        and 'credential_request' not in risk_keys
+        and 'domain_mismatch' not in risk_keys
+        and 'suspicious_link' not in risk_keys
+        and 'suspicious_sender_domain' not in risk_keys
+        and 'sender_email_present' in context_keys
+        and risk_score <= 0
     )
     benign_model_disagreement = (
         prob >= threshold
@@ -199,6 +210,15 @@ def compute_user_verdict(result, rules: dict, support_result=None):
         display_prob = max(0.0, threshold - 0.01)
         review_recommended = True
         decision_basis = 'account_security_notice_override'
+    elif (
+        prob >= threshold
+        and account_access_notice
+    ):
+        main_label = "Legitimate"
+        level = "review"
+        display_prob = max(0.0, threshold - 0.01)
+        review_recommended = True
+        decision_basis = 'account_access_notification_override'
     elif (
         prob >= threshold
         and safe_routine_message
