@@ -33,17 +33,27 @@ Install the dependencies:
 python -m pip install -r requirements.txt
 ```
 
+Add the DistilBERT model. The DistilBERT weights are provided separately as a GitHub Release asset because the model.safetensors file is too large for normal GitHub repository storage. To enable the full DistilBERT version, download model.safetensors from the v1.0 release and place it in:
+
+```text
+models/distilbert/final_model/
+```
+
+The folder should then contain:
+
+```text
+config.json
+model.safetensors
+special_tokens_map.json
+tokenizer.json
+tokenizer_config.json
+vocab.txt
+```
+
 Run the Streamlit app:
 
 ```powershell
 python -m streamlit run app\app.py
-```
-
-If you do not want to activate the virtual environment manually, run Streamlit through the venv Python directly:
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m streamlit run app\app.py
 ```
 
 Using python -m streamlit is recommended because it ensures Streamlit runs with the same Python environment where the dependencies are installed.
