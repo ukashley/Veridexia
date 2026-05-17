@@ -19,6 +19,30 @@ CREDENTIAL_REQUEST_PATTERNS = [
     r'\bclick\b.{0,25}\b(login|sign in|verify|confirm|validate)\b',
 ]
 
+SENSITIVE_INFO_REQUEST_PATTERNS = [
+    r'\b(confirm|verify|provide|submit|update|review)\b.{0,50}\b(payroll|salary|wages?|employee payment records?|payment records?|bank(?:ing)? details?|direct deposit|sort code|account number|tax (?:code|information|details)|national insurance|social security|personal details?)\b',
+    r'\b(payroll|salary|wages?|employee payment records?|payment records?|bank(?:ing)? details?|direct deposit|sort code|account number|tax (?:code|information|details)|national insurance|social security|personal details?)\b.{0,50}\b(confirm|verify|provide|submit|update|review)\b',
+    r'\bsecure staff form\b',
+    r'\bstaff form below\b',
+]
+
+EXTERNAL_ACTION_REQUEST_PATTERNS = [
+    r'\b(?:please\s+)?(?:click|open|view|review|check|choose|select|confirm|verify|update|provide|submit|complete|access|download|clear|read|acknowledge|accept|approve|sign|attest)\b.{0,80}\b(?:link|form|portal|page|settings|account|document|file|message|details?|information|records?|comments?|feedback|invoice|payment|mailbox|storage|quota|files?|policy|policies|terms|agreement|acknowledg(?:e)?ment)\b',
+    r'\b(?:please\s+)?(?:choose|select|schedule|reschedule|arrange|book|pick|set)\b.{0,80}\b(?:time|slot|appointment|delivery|redelivery|collection|pickup)\b',
+    r'\b(?:using|via|through|from)\s+(?:the\s+)?(?:secure\s+)?(?:link|form|portal|page)\b',
+    r'\b(?:link|form|portal|page|document|file)\s+(?:below|attached|shared)\b',
+    r'\b(?:open|view|review|check|download)\s+(?:the\s+)?(?:document|file|comments?|feedback|message)\b',
+    r'\b(?:read|acknowledge|accept|approve|sign|attest)\b.{0,80}\b(?:here|below|online|portal|page|policy|policies|terms|agreement|acknowledg(?:e)?ment)\b',
+]
+
+CONSEQUENCE_PRESSURE_PATTERNS = [
+    r'\bto avoid\b.{0,70}\b(?:delay|return|suspension|lockout|interruption|missed payment|non[- ]payment|restriction|deactivation|loss|failed delivery)\b',
+    r'\b(?:will|may|could|might)\b.{0,80}\b(?:unable|suspended|locked|returned|delayed|restricted|disabled|terminated|interrupted)\b',
+    r'\b(?:before|by|within)\b.{0,35}\b(?:deadline|final|expires?|capacity|payment cycle|next \d+ (?:minutes?|hours?|days?))\b',
+    r'\b(?:required|must|need(?:ed)?|mandatory)\b.{0,80}\b(?:acknowledge|accept|approve|sign|attest|complete|confirm|verify|submit|review)\b',
+    r'\b(?:acknowledge|accept|approve|sign|attest|complete|confirm|verify|submit|review)\b.{0,80}\b(?:before|by|within)\b.{0,45}\b(?:review|deadline|audit|compliance|cutoff|cut-off|expires?)\b',
+]
+
 SECURITY_NOTIFICATION_PATTERNS = [
     r'\byour password (was|has been) (changed|reset|updated)\b',
     r'\bif you did not (make|request|initiate|authorise|authorize) this (change|reset|request)\b',
@@ -68,6 +92,12 @@ URGENCY_PATTERNS = [
     r'\bact now\b',
     r'\bwithin \d+ (minutes?|hours?|days?)\b',
     r'\bexpires? (today|soon|within)\b',
+    r'\bby (monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?:\s+\d{1,2}(?::\d{2})?)?\b',
+    r'\bbefore (monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?:\s+\d{1,2}(?::\d{2})?)?\b',
+    r'\b(?:before|by) \d{1,2}:\d{2}\b',
+    r'\bwithin the next \d+ (minutes?|hours?|days?)\b',
+    r'\bto avoid (?:delays?|suspension|lockout|interruption|missed payment|non[- ]payment)\b',
+    r'\bto avoid return to sender\b',
 ]
 
 THREAT_PATTERNS = [
@@ -76,6 +106,9 @@ THREAT_PATTERNS = [
     r'\bpermanent suspension\b',
     r'\bunauthori[sz]ed activity\b',
     r'\bsecurity breach\b',
+    r'\bunable to send or receive (?:new )?messages\b',
+    r'\bprevent interruption\b',
+    r'\breturn to sender\b',
 ]
 
 PAYMENT_PATTERNS = [
@@ -160,7 +193,8 @@ GENERIC_GREETING_PATTERNS = [
 GENERIC_BRAND_TOKENS = {
     'mail', 'email', 'teamtailor', 'noreply', 'reply', 'support', 'service',
     'help', 'alerts', 'notice', 'notify', 'news', 'info', 'com', 'co', 'uk',
-    'org', 'net', 'update', 'updates', 'newsletter',
+    'org', 'net', 'update', 'updates', 'newsletter', 'example', 'company',
+    'policy', 'policies', 'team',
 }
 
 PERSONAL_EMAIL_DOMAINS = {
@@ -282,15 +316,19 @@ def _url_signal(urls):
     for raw in urls[:5]:
         host = _url_host(raw)
 
-        if raw.lower().startswith('http://') or raw.lower().startswith('hxxp://'):
+        if raw.lower().startswith('http://'):
             risk += 0.8
             reasons.append('uses insecure HTTP')
+
+        if re.match(r'hxxps?://', raw, flags=re.I):
+            risk += 0.6
+            reasons.append('uses an obfuscated hxxp-style URL')
 
         if re.fullmatch(r'(?:\d{1,3}\.){3}\d{1,3}', host):
             risk += 1.1
             reasons.append('uses a raw IP address')
 
-        if any(token in host for token in ['login', 'verify', 'secure', 'account', 'signin', 'update']):
+        if any(token in host for token in ['login', 'verify', 'secure', 'account', 'signin', 'update', 'quota']):
             risk += 0.7
             reasons.append('contains login-style domain terms')
 
@@ -333,6 +371,10 @@ def _sender_domain_signal(sender_domain: str):
     if any(token in host for token in ['login', 'verify', 'secure', 'reset']):
         risk += 0.7
         reasons.append('contains phishing-style sender terms')
+
+    if re.search(r'(?:account|security)[a-z-]*\d{2,}', host):
+        risk += 0.5
+        reasons.append('combines account/security wording with numbers')
 
     if host.count('-') >= 2:
         risk += 0.3
@@ -389,6 +431,39 @@ def rule_based_evidence(text: str, sender_email: str = "", subject: str = ""):
             'The message asks you to provide, confirm, or enter a password, code, or login detail.',
             2.4,
             credential_hits,
+            'risk',
+        ))
+
+    sensitive_hits = _find_matches(SENSITIVE_INFO_REQUEST_PATTERNS, combined_l)
+    if sensitive_hits:
+        risk_signals.append(_signal(
+            'sensitive_info_request',
+            'Sensitive information request',
+            'The message asks the recipient to confirm or update sensitive payroll, payment, banking, or personal details.',
+            1.8,
+            sensitive_hits,
+            'risk',
+        ))
+
+    action_hits = _find_matches(EXTERNAL_ACTION_REQUEST_PATTERNS, combined_l)
+    if action_hits and urls:
+        risk_signals.append(_signal(
+            'external_action_request',
+            'External action request',
+            'The message asks the recipient to take an action through a link or external page.',
+            1.2,
+            action_hits,
+            'risk',
+        ))
+
+    consequence_hits = _find_matches(CONSEQUENCE_PRESSURE_PATTERNS, combined_l)
+    if consequence_hits:
+        risk_signals.append(_signal(
+            'consequence_pressure',
+            'Consequence pressure',
+            'The message links the requested action to a negative consequence or deadline pressure.',
+            1.1,
+            consequence_hits,
             'risk',
         ))
 
@@ -613,6 +688,21 @@ def rule_based_evidence(text: str, sender_email: str = "", subject: str = ""):
             -1.2,
             [f"sender={sender_base_domain}", f"link={sender_base_domain}"],
             'reassurance',
+        ))
+
+    link_action_context = bool(sensitive_hits or action_hits) or bool(re.search(
+        r'\b(confirm|verify|provide|submit|update|review|open|view|check|download|clear|choose|select|schedule|reschedule|arrange)\b.{0,60}\b(form|details?|records?|account|profile|settings|storage|mailbox|quota|document|file|comments|feedback|delivery|parcel|redelivery|slot|time)\b',
+        combined_l,
+        flags=re.I | re.S,
+    ))
+    if sender_base_domain and url_domains and sender_base_domain not in url_domains and link_action_context:
+        risk_signals.append(_signal(
+            'link_domain_mismatch',
+            'Link domain differs from sender',
+            'The message asks for a sensitive action through a link whose visible domain does not match the sender domain.',
+            1.3,
+            [f"sender={sender_base_domain}", f"link={', '.join(url_domains[:2])}"],
+            'risk',
         ))
 
     brand_tokens = _brand_tokens(sender_email)

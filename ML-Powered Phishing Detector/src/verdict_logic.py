@@ -27,27 +27,55 @@ def compute_user_verdict(result, rules: dict, support_result=None):
     # High-risk cues that should not be ignored just because the wording looks normal.
     dangerous_risk_keys = {
         'credential_request',
+        'sensitive_info_request',
         'threat_language',
         'suspicious_link',
         'domain_mismatch',
+        'link_domain_mismatch',
         'suspicious_sender_domain',
     }
     no_dangerous_cues = not bool(dangerous_risk_keys & risk_keys)
     has_model_support = support_prob is not None
     max_model_prob = max(prob, support_prob if support_prob is not None else 0.0)
+    benign_link_reassurance = (
+        bool({'link_domain_match', 'brand_related_link'} & reassurance_keys)
+        and 'domain_mismatch' not in risk_keys
+        and 'link_domain_mismatch' not in risk_keys
+        and 'suspicious_sender_domain' not in risk_keys
+    )
     strong_phishing_combo = (
         (
             'credential_request' in risk_keys
             and (
-                bool({'urgency', 'threat_language', 'suspicious_link', 'domain_mismatch', 'suspicious_sender_domain'} & risk_keys)
+                bool({'urgency', 'threat_language', 'suspicious_link', 'domain_mismatch', 'link_domain_mismatch', 'suspicious_sender_domain'} & risk_keys)
                 or max_model_prob >= 0.55
+            )
+        )
+        or (
+            'sensitive_info_request' in risk_keys
+            and (
+                bool({'threat_language', 'suspicious_link', 'domain_mismatch', 'link_domain_mismatch', 'suspicious_sender_domain'} & risk_keys)
+                or ('urgency' in risk_keys and max_model_prob >= 0.35)
+            )
+        )
+        or (
+            'external_action_request' in risk_keys
+            and (
+                (
+                    'link_domain_mismatch' in risk_keys
+                    and bool({'urgency', 'threat_language', 'consequence_pressure', 'suspicious_link', 'suspicious_sender_domain'} & risk_keys)
+                )
+                or (
+                    'suspicious_link' in risk_keys
+                    and bool({'urgency', 'threat_language', 'consequence_pressure', 'suspicious_sender_domain'} & risk_keys)
+                )
             )
         )
         or (
             'suspicious_link' in risk_keys
             and (
-                bool({'domain_mismatch', 'suspicious_sender_domain'} & risk_keys)
-                or max_model_prob >= threshold
+                bool({'domain_mismatch', 'link_domain_mismatch', 'suspicious_sender_domain', 'sensitive_info_request'} & risk_keys)
+                or (max_model_prob >= threshold and risk_score >= 0.8 and not benign_link_reassurance)
             )
         )
         or (
@@ -308,6 +336,11 @@ def compute_user_verdict(result, rules: dict, support_result=None):
         has_model_support
         and support_prob >= threshold
         and not safe_routine_message
+        and not (
+            benign_link_reassurance
+            and risk_score <= 0
+            and bool({'newsletter_context', 'marketing_promotion_context', 'sender_brand_match'} & reassurance_keys)
+        )
         and (
             bool(dangerous_risk_keys & risk_keys)
             or 'urgency' in risk_keys
@@ -318,6 +351,24 @@ def compute_user_verdict(result, rules: dict, support_result=None):
         level = "medium"
         display_prob = support_prob
         decision_basis = 'support_model_risk_override'
+    elif (
+        prob < threshold
+        and 'external_action_request' in risk_keys
+        and int(rules.get('url_count', 0)) > 0
+        and not (benign_link_reassurance and risk_score <= 0)
+        and (
+            bool({'link_domain_mismatch', 'suspicious_link', 'suspicious_sender_domain'} & risk_keys)
+            or (
+                risk_score >= 2.5
+                and not bool({'domain_match', 'link_domain_match', 'brand_related_link'} & reassurance_keys)
+            )
+        )
+    ):
+        main_label = "Legitimate"
+        level = "review"
+        review_recommended = True
+        display_prob = max(prob, min(max(max_model_prob, 0.55), max(0.0, threshold - 0.01)))
+        decision_basis = 'risk_evidence_review'
     else:
         main_label = "Legitimate"
         level = "review" if risk_score > 0 and near_boundary else "low"
